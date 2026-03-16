@@ -17,7 +17,19 @@ use nano_agent::types::*;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+// ---------------------------------------------------------------------------
+// LLM factory
+// ---------------------------------------------------------------------------
+
+fn create_llm(backend: &str) -> Box<dyn Llm> {
+    match backend {
+        "openai" => Box::new(OpenAiLlm::from_env()),
+        _ => Box::new(AnthropicLlm::from_env()),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Extended tool definitions (L2–L11)
@@ -257,6 +269,16 @@ fn extended_tool_definitions() -> Vec<serde_json::Value> {
                 "required": ["prompt"]
             }
         }),
+        serde_json::json!({
+            "name": "compact",
+            "description": "Trigger on-demand conversation compaction. Saves the current transcript and replaces messages with a summary. Use when the conversation is getting long and you want to free up context.",
+            "input_schema": { "type": "object", "properties": {} }
+        }),
+        serde_json::json!({
+            "name": "idle",
+            "description": "Transition from WORK to IDLE phase. Use when you have completed your current task and are waiting for new work. Only available to teammates, not the lead agent.",
+            "input_schema": { "type": "object", "properties": {} }
+        }),
     ]
 }
 
@@ -278,6 +300,8 @@ fn build_extended_dispatch(
     tasks_dir: PathBuf,
     agent_name: String,
     llm_backend: String,
+    compact_signal: Arc<CompactSignal>,
+    idle_signal: Arc<AtomicBool>,
 ) -> Dispatch {
     let mut dispatch: Dispatch = HashMap::new();
 
@@ -461,23 +485,123 @@ fn build_extended_dispatch(
         }));
     }
 
-    // -- L8: spawn_teammate
+    // -- L8: spawn_teammate (with real lifecycle thread)
     {
         let tm_mgr = Arc::clone(&teammate_manager);
+        let bus = Arc::clone(&message_bus);
+        let tasks_d = tasks_dir.clone();
+        let backend = llm_backend.clone();
+        let cwd = repo_root.clone();
+        let transcript_d = cwd.join(".nano-agent").join("transcripts");
+        let sk_loader = Arc::clone(&skill_loader);
+        let t_manager = Arc::clone(&task_manager);
+        let bg_mgr = Arc::clone(&bg);
+        let req_tracker = Arc::clone(&request_tracker);
+        let ev_bus = Arc::clone(&event_bus);
+        let todo_mgr = Arc::clone(&todo);
+        let nag_pol = Arc::clone(&nag);
         dispatch.insert("spawn_teammate".into(), Box::new(move |input| {
             let name = match input.get("name").and_then(|v| v.as_str()) {
-                Some(n) => n,
+                Some(n) => n.to_string(),
                 None => return "Error: missing 'name'".into(),
             };
             let role = match input.get("role").and_then(|v| v.as_str()) {
-                Some(r) => r,
+                Some(r) => r.to_string(),
                 None => return "Error: missing 'role'".into(),
             };
             let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
-                Some(p) => p,
+                Some(p) => p.to_string(),
                 None => return "Error: missing 'prompt'".into(),
             };
-            tm_mgr.lock().unwrap().spawn(name, role, prompt)
+
+            // Register teammate
+            let result = tm_mgr.lock().unwrap().spawn(&name, &role, &prompt);
+            if result.starts_with("Error") {
+                return result;
+            }
+
+            // Clone everything needed for the thread
+            let tm_mgr_t = Arc::clone(&tm_mgr);
+            let bus_t = Arc::clone(&bus);
+            let tasks_d_t = tasks_d.clone();
+            let transcript_d_t = transcript_d.clone();
+            let backend_t = backend.clone();
+            let cwd_t = cwd.clone();
+            let sk_loader_t = Arc::clone(&sk_loader);
+            let t_manager_t = Arc::clone(&t_manager);
+            let bg_mgr_t = Arc::clone(&bg_mgr);
+            let req_tracker_t = Arc::clone(&req_tracker);
+            let ev_bus_t = Arc::clone(&ev_bus);
+            let todo_mgr_t = Arc::clone(&todo_mgr);
+            let nag_pol_t = Arc::clone(&nag_pol);
+            let name_t = name.clone();
+            let role_t = role.clone();
+            let prompt_t = prompt.clone();
+
+            std::thread::spawn(move || {
+                let mut llm_box = create_llm(&backend_t);
+
+                // Build tool defs + dispatch for the teammate
+                let mut tool_defs = tools::tool_definitions();
+                tool_defs.extend(extended_tool_definitions());
+
+                // Teammates only need idle_signal (compact is handled by lifecycle)
+                let teammate_compact = Arc::new(CompactSignal::new());
+                let teammate_idle = Arc::new(AtomicBool::new(false));
+
+                let mut dispatch = tools::build_dispatch(&cwd_t);
+                let extended = build_extended_dispatch(
+                    todo_mgr_t,
+                    nag_pol_t,
+                    sk_loader_t,
+                    t_manager_t,
+                    bg_mgr_t,
+                    Arc::clone(&bus_t),
+                    Arc::clone(&tm_mgr_t),
+                    req_tracker_t,
+                    ev_bus_t,
+                    cwd_t,
+                    tasks_d_t.clone(),
+                    name_t.clone(),
+                    backend_t,
+                    teammate_compact,
+                    Arc::clone(&teammate_idle),
+                );
+                dispatch.extend(extended);
+
+                let system = format!(
+                    "You are '{}', a teammate agent (role: {}). Your initial task:\n{}\n\n\
+                     When you finish your current work, call the `idle` tool to enter idle mode \
+                     and wait for new tasks or messages.",
+                    name_t, role_t, prompt_t
+                );
+
+                let mut messages = vec![serde_json::json!({
+                    "role": "user",
+                    "content": prompt_t,
+                })];
+
+                let ctx = autonomy::LifecycleContext {
+                    teammate_manager: tm_mgr_t,
+                    message_bus: bus_t,
+                    tasks_dir: tasks_d_t,
+                    transcript_dir: transcript_d_t,
+                    agent_name: name_t,
+                };
+                let config = autonomy::LifecycleConfig::default();
+                autonomy::run_teammate_lifecycle(
+                    llm_box.as_mut(),
+                    &system,
+                    &mut messages,
+                    &tool_defs,
+                    &dispatch,
+                    &ctx,
+                    &teammate_idle,
+                    &config,
+                );
+            });
+
+            result
         }));
     }
 
@@ -591,11 +715,7 @@ fn build_extended_dispatch(
                 Some(p) => p,
                 None => return "Error: missing 'prompt'".into(),
             };
-            // Create a fresh LLM instance for the subagent
-            let mut child_llm: Box<dyn Llm> = match backend.as_str() {
-                "openai" => Box::new(OpenAiLlm::from_env()),
-                _ => Box::new(AnthropicLlm::from_env()),
-            };
+            let mut child_llm = create_llm(&backend);
             let child_tool_defs = child_tools();
             let child_dispatch = tools::build_dispatch(&cwd);
             SubagentFactory::spawn(
@@ -605,6 +725,24 @@ fn build_extended_dispatch(
                 &child_dispatch,
                 10,
             )
+        }));
+    }
+
+    // -- compact tool handler
+    {
+        let signal = compact_signal;
+        dispatch.insert("compact".into(), Box::new(move |_| {
+            signal.request();
+            "Compaction requested. The conversation will be compacted after this tool call completes.".into()
+        }));
+    }
+
+    // -- idle tool handler
+    {
+        let signal = idle_signal;
+        dispatch.insert("idle".into(), Box::new(move |_| {
+            signal.store(true, Ordering::Release);
+            "Transitioning to idle phase. You will be woken when new work arrives.".into()
         }));
     }
 
@@ -666,7 +804,11 @@ fn main() {
     // Pre-warm: list team (ensures config is written)
     let _ = teammate_manager.lock().unwrap().list_all();
 
-    // -- Build tool definitions: base (4) + extended (22)
+    // -- Signals for compact and idle
+    let compact_signal = Arc::new(CompactSignal::new());
+    let idle_signal = Arc::new(AtomicBool::new(false));
+
+    // -- Build tool definitions: base (4) + extended (24)
     let mut tool_defs = tools::tool_definitions();
     tool_defs.extend(extended_tool_definitions());
 
@@ -686,6 +828,8 @@ fn main() {
         tasks_dir.clone(),
         agent_name.clone(),
         backend.clone(),
+        Arc::clone(&compact_signal),
+        Arc::clone(&idle_signal),
     );
     dispatch.extend(extended);
 
@@ -812,11 +956,7 @@ fn main() {
         {
             let inbox = message_bus.read_inbox(&agent_name);
             if !inbox.is_empty() {
-                let text = format!(
-                    "[Inbox: {} message(s)]\n{}",
-                    inbox.len(),
-                    serde_json::to_string_pretty(&inbox).unwrap_or_default()
-                );
+                let text = autonomy::format_inbox(&inbox);
                 messages.push(serde_json::json!({"role": "user", "content": text}));
             }
         }
@@ -848,12 +988,18 @@ fn main() {
         );
 
         // -- Run the agent loop
+        let signals = LoopSignals {
+            compact_signal: Some(&compact_signal),
+            transcript_dir: Some(&transcript_dir),
+            idle_signal: None, // no idle for lead agent
+        };
         let _calls = run_agent_loop(
             llm_box.as_mut(),
             &system,
             &mut messages,
             &tool_defs,
             &dispatch,
+            &signals,
         );
 
         // -- Print the last assistant message

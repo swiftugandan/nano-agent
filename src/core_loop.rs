@@ -1,14 +1,20 @@
 use crate::types::*;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 /// Run the core agent loop pattern with an LLM.
 /// Returns the number of LLM calls made.
+///
+/// `signals` bundles optional control signals:
+/// - `compact_signal` + `transcript_dir`: on-demand compaction when the LLM calls `compact`
+/// - `idle_signal`: breaks the loop when the agent calls `idle` (for teammate lifecycle)
 pub fn run_agent_loop(
     llm: &mut dyn Llm,
     system: &str,
     messages: &mut Vec<serde_json::Value>,
     tools: &[serde_json::Value],
     dispatch: &Dispatch,
+    signals: &LoopSignals,
 ) -> usize {
     let mut call_count = 0;
     loop {
@@ -58,6 +64,22 @@ pub fn run_agent_loop(
             "role": "user",
             "content": results,
         }));
+
+        // Check compact signal: run auto_compact if requested
+        if let (Some(signal), Some(dir)) = (signals.compact_signal, signals.transcript_dir) {
+            if signal.take() {
+                let (new_msgs, path) = crate::memory::auto_compact(messages, llm, dir);
+                *messages = new_msgs;
+                eprintln!("[compact] On-demand compaction saved: {}", path.display());
+            }
+        }
+
+        // Check idle signal: break loop to return control to lifecycle
+        if let Some(signal) = signals.idle_signal {
+            if signal.load(Ordering::Acquire) {
+                break;
+            }
+        }
     }
     call_count
 }

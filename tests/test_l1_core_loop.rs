@@ -13,7 +13,7 @@ fn test_l1_01_loop_terminates_on_end_turn() {
     llm.queue("end_turn", vec![make_text_block("Done.")]);
 
     let mut messages = vec![serde_json::json!({"role": "user", "content": "Hello"})];
-    let call_count = run_agent_loop(&mut llm, "Test", &mut messages, &[], &HashMap::new());
+    let call_count = run_agent_loop(&mut llm, "Test", &mut messages, &[], &HashMap::new(), &LoopSignals::none());
 
     assert_eq!(call_count, 1);
     assert_eq!(messages.len(), 2); // user + assistant
@@ -41,6 +41,7 @@ fn test_l1_02_loop_continues_on_tool_use() {
         &mut messages,
         &[serde_json::json!({"name": "echo"})],
         &dispatch,
+        &LoopSignals::none(),
     );
 
     assert_eq!(call_count, 2);
@@ -80,6 +81,7 @@ fn test_l1_07_tool_result_ids_match_tool_use_ids() {
         &mut messages,
         &[serde_json::json!({"name": "echo"})],
         &dispatch,
+        &LoopSignals::none(),
     );
 
     // Find tool_use ids from assistant messages
@@ -138,7 +140,7 @@ fn test_l1_04_unknown_tool_returns_error_string() {
 
     let dispatch = make_dispatch(HashMap::from([("foo".to_string(), "foo_result".to_string())]));
     let mut messages = vec![serde_json::json!({"role": "user", "content": "Test"})];
-    run_agent_loop(&mut llm, "Test", &mut messages, &[], &dispatch);
+    run_agent_loop(&mut llm, "Test", &mut messages, &[], &dispatch, &LoopSignals::none());
 
     // The tool_result should contain "Unknown tool"
     for msg in &messages {

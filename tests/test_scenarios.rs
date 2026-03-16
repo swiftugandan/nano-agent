@@ -6,6 +6,7 @@
 use nano_agent::autonomy;
 use nano_agent::concurrency::BackgroundManager;
 use nano_agent::core_loop::{run_agent_loop, PathSandbox};
+use nano_agent::types::LoopSignals;
 use nano_agent::delegation::SubagentFactory;
 use nano_agent::isolation::{EventBus, WorktreeManager};
 use nano_agent::knowledge::SkillLoader;
@@ -75,7 +76,7 @@ fn scenario_01_loop_with_planning_nag() {
     assert!(nag_fired, "NagPolicy should fire after 3 ticks without todo use");
 
     // Run agent loop
-    let calls = run_agent_loop(&mut llm, "system", &mut messages, &tools, &dispatch);
+    let calls = run_agent_loop(&mut llm, "system", &mut messages, &tools, &dispatch, &LoopSignals::none());
     assert_eq!(calls, 4);
 
     // Verify todo manager rejects bad states
@@ -977,7 +978,7 @@ fn scenario_19_full_session_simulation() {
         serde_json::json!({"role": "user", "content": "Process config and create output"}),
     ];
 
-    let calls = run_agent_loop(&mut llm, "You are a helper.", &mut messages, &tools, &dispatch);
+    let calls = run_agent_loop(&mut llm, "You are a helper.", &mut messages, &tools, &dispatch, &LoopSignals::none());
 
     // Should have made 4 LLM calls (3 tool_use + 1 end_turn)
     assert_eq!(calls, 4);

@@ -196,6 +196,18 @@ impl TeammateManager {
         self.config.members.iter().map(|m| m.name.clone()).collect()
     }
 
+    pub fn set_status(&mut self, name: &str, status: &str) {
+        if let Some(member) = self.find_member_mut(name) {
+            member.status = status.to_string();
+            self.save_config();
+        }
+    }
+
+    pub fn is_shutdown_requested(&self, name: &str) -> bool {
+        self.find_member(name)
+            .map_or(false, |m| m.status == "shutdown")
+    }
+
     fn save_config(&self) {
         let config_path = self.dir.join("config.json");
         let content = serde_json::to_string_pretty(&self.config).unwrap();
