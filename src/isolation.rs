@@ -3,6 +3,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // EventBus: append-only lifecycle events (JSONL)
@@ -16,9 +17,6 @@ impl EventBus {
     pub fn new(log_path: &Path) -> Self {
         if let Some(parent) = log_path.parent() {
             std::fs::create_dir_all(parent).ok();
-        }
-        if !log_path.exists() {
-            std::fs::write(log_path, "").ok();
         }
         Self {
             log_path: log_path.to_path_buf(),
@@ -107,12 +105,6 @@ impl<'a> WorktreeManager<'a> {
         let dir = repo_root.join(".worktrees");
         std::fs::create_dir_all(&dir).ok();
         let index_path = dir.join("index.json");
-        if !index_path.exists() {
-            let index = WorktreeIndex {
-                worktrees: Vec::new(),
-            };
-            std::fs::write(&index_path, serde_json::to_string_pretty(&index).unwrap()).ok();
-        }
         Self {
             repo_root: repo_root.to_path_buf(),
             tasks,
@@ -123,7 +115,8 @@ impl<'a> WorktreeManager<'a> {
     }
 
     fn validate_name(&self, name: &str) -> Result<(), String> {
-        let re = Regex::new(r"^[A-Za-z0-9._-]{1,40}$").unwrap();
+        static RE: OnceLock<Regex> = OnceLock::new();
+        let re = RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9._-]{1,40}$").unwrap());
         if !re.is_match(name) {
             return Err(
                 "Invalid worktree name. Use 1-40 chars: letters, numbers, ., _, -".to_string(),

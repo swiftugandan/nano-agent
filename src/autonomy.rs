@@ -1,40 +1,21 @@
-use crate::tasks::Task;
+use crate::tasks::{load_all_tasks, Task};
 use std::path::Path;
 
 /// Scan for unclaimed tasks: pending, no owner, empty blockedBy.
 pub fn scan_unclaimed_tasks(dir: &Path) -> Vec<Task> {
-    let mut unclaimed: Vec<Task> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
-        paths.sort();
-        for path in paths {
-            if path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map_or(false, |n| n.starts_with("task_") && n.ends_with(".json"))
-            {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(task) = serde_json::from_str::<Task>(&content) {
-                        if task.status == "pending"
-                            && task.owner.is_empty()
-                            && task.blocked_by.is_empty()
-                        {
-                            unclaimed.push(task);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let mut unclaimed: Vec<Task> = load_all_tasks(dir)
+        .into_iter()
+        .filter(|task| {
+            task.status == "pending" && task.owner.is_empty() && task.blocked_by.is_empty()
+        })
+        .collect();
+    unclaimed.sort_by_key(|t| t.id);
     unclaimed
 }
 
 /// Claim a task: set owner and status to in_progress.
 pub fn claim_task(dir: &Path, task_id: i64, owner: &str) -> String {
     let path = dir.join(format!("task_{}.json", task_id));
-    if !path.exists() {
-        return format!("Error: Task {} not found", task_id);
-    }
     match std::fs::read_to_string(&path) {
         Ok(content) => match serde_json::from_str::<Task>(&content) {
             Ok(mut task) => {

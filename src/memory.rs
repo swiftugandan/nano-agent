@@ -1,8 +1,8 @@
 use crate::types::*;
 use std::path::{Path, PathBuf};
 
-pub const KEEP_RECENT: usize = 3;
-pub const THRESHOLD: usize = 50_000;
+pub const KEEP_RECENT: usize = 10;
+pub const THRESHOLD: usize = 180_000;
 
 /// Rough token count: ~4 chars per token.
 pub fn estimate_tokens(messages: &[serde_json::Value]) -> usize {
@@ -97,25 +97,18 @@ pub fn auto_compact(
     llm: &mut dyn Llm,
     transcript_dir: &Path,
 ) -> (Vec<serde_json::Value>, PathBuf) {
-    // Save full transcript
-    std::fs::create_dir_all(transcript_dir).ok();
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let transcript_path = transcript_dir.join(format!("transcript_{}.jsonl", timestamp));
-
-    let mut content = String::new();
-    for msg in messages {
-        content.push_str(&serde_json::to_string(msg).unwrap_or_default());
-        content.push('\n');
-    }
-    std::fs::write(&transcript_path, &content).ok();
+    // Save full transcript via TranscriptStore
+    let store = TranscriptStore::new(transcript_dir);
+    let transcript_path = store.save(messages);
 
     // Ask LLM to summarize
     let conversation_text = serde_json::to_string(messages).unwrap_or_default();
-    let truncated = if conversation_text.len() > 80000 {
-        &conversation_text[..80000]
+    let truncated = if conversation_text.len() > 300_000 {
+        let mut end = 300_000;
+        while end > 0 && !conversation_text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &conversation_text[..end]
     } else {
         &conversation_text
     };
@@ -133,7 +126,7 @@ pub fn auto_compact(
             )),
         }],
         tools: Vec::new(),
-        max_tokens: 2000,
+        max_tokens: 4000,
     });
 
     let summary = response

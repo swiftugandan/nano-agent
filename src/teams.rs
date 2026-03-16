@@ -85,10 +85,10 @@ impl MessageBus {
 
     pub fn read_inbox(&self, name: &str) -> Vec<serde_json::Value> {
         let inbox_path = self.dir.join(format!("{}.jsonl", name));
-        if !inbox_path.exists() {
+        let content = std::fs::read_to_string(&inbox_path).unwrap_or_default();
+        if content.is_empty() {
             return Vec::new();
         }
-        let content = std::fs::read_to_string(&inbox_path).unwrap_or_default();
         let messages: Vec<serde_json::Value> = content
             .lines()
             .filter(|l| !l.is_empty())

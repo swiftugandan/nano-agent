@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 /// Mock LLM that returns pre-queued responses. Mirrors Python conftest.py MockLLM.
 pub struct MockLLM {
     responses: VecDeque<LlmResponse>,
-    call_count: usize,
     calls: Vec<LlmParams>,
 }
 
@@ -12,7 +11,6 @@ impl MockLLM {
     pub fn new() -> Self {
         Self {
             responses: VecDeque::new(),
-            call_count: 0,
             calls: Vec::new(),
         }
     }
@@ -44,7 +42,7 @@ impl MockLLM {
     }
 
     pub fn call_count(&self) -> usize {
-        self.call_count
+        self.calls.len()
     }
 
     pub fn calls(&self) -> &[LlmParams] {
@@ -55,7 +53,6 @@ impl MockLLM {
 impl Llm for MockLLM {
     fn create(&mut self, params: LlmParams) -> LlmResponse {
         self.calls.push(params);
-        self.call_count += 1;
         if let Some(response) = self.responses.pop_front() {
             response
         } else {

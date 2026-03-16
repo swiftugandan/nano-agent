@@ -22,7 +22,7 @@ pub fn run_agent_loop(
             system: system.to_string(),
             messages: typed_messages,
             tools: tools.to_vec(),
-            max_tokens: 8000,
+            max_tokens: 16_000,
         });
         call_count += 1;
 

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn test_l7_01_run_returns_immediately() {
-    let mut bg = BackgroundManager::new();
+    let bg = BackgroundManager::new();
     let start = Instant::now();
     let result = bg.run("sleep 10");
     let elapsed = start.elapsed();
@@ -14,7 +14,7 @@ fn test_l7_01_run_returns_immediately() {
 
 #[test]
 fn test_l7_02_drain_is_atomic() {
-    let mut bg = BackgroundManager::new();
+    let bg = BackgroundManager::new();
     bg.run("echo hello");
     bg.run("echo world");
     // Wait for both to complete
@@ -27,7 +27,7 @@ fn test_l7_02_drain_is_atomic() {
 
 #[test]
 fn test_l7_03_results_injected_before_llm_call() {
-    let mut bg = BackgroundManager::new();
+    let bg = BackgroundManager::new();
     bg.run("echo bg_result");
     std::thread::sleep(Duration::from_millis(500));
 
@@ -60,7 +60,7 @@ fn test_l7_03_results_injected_before_llm_call() {
 
 #[test]
 fn test_l7_04_captures_stdout_and_stderr() {
-    let mut bg = BackgroundManager::new();
+    let bg = BackgroundManager::new();
     bg.run("echo stdout_msg && echo stderr_msg >&2");
     std::thread::sleep(Duration::from_secs(1));
     let notifs = bg.drain_notifications();
@@ -76,7 +76,7 @@ fn test_l7_05_timeout_produces_error_status() {
     // For this test, we use a command that we know will complete quickly
     // but simulates the timeout concept. In the real Python test, they
     // monkey-patch the timeout to 1s. Here we test a fast-failing command.
-    let mut bg = BackgroundManager::new();
+    let bg = BackgroundManager::new();
     bg.run("exit 1");
     std::thread::sleep(Duration::from_secs(1));
     let notifs = bg.drain_notifications();

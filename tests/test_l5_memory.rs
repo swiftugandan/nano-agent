@@ -44,7 +44,7 @@ fn make_messages_with_tool_results(count: usize) -> Vec<serde_json::Value> {
 
 #[test]
 fn test_l5_01_preserves_last_n_tool_results() {
-    let mut messages = make_messages_with_tool_results(6);
+    let mut messages = make_messages_with_tool_results(15);
     micro_compact(&mut messages);
 
     // Collect tool_results
@@ -75,7 +75,7 @@ fn test_l5_01_preserves_last_n_tool_results() {
 
 #[test]
 fn test_l5_02_placeholders_not_empty() {
-    let mut messages = make_messages_with_tool_results(5);
+    let mut messages = make_messages_with_tool_results(15);
     micro_compact(&mut messages);
 
     let mut tool_results: Vec<String> = Vec::new();

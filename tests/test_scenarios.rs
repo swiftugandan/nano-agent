@@ -236,8 +236,8 @@ fn scenario_04_memory_compaction_pipeline() {
             }
         }
     }
-    assert_eq!(full_results, 3, "should keep 3 most recent tool results");
-    assert_eq!(placeholders, 17, "should replace 17 older tool results");
+    assert_eq!(full_results, memory::KEEP_RECENT, "should keep KEEP_RECENT most recent tool results");
+    assert_eq!(placeholders, 20 - memory::KEEP_RECENT, "should replace older tool results");
 
     // Step 2: Auto-compact produces exactly 2 messages and saves transcript
     let mut summary_llm = MockLLM::new();
@@ -344,7 +344,7 @@ fn scenario_06_background_tasks_feed_loop() {
     fs::write(dir.path().join("a.txt"), "alpha").unwrap();
     fs::write(dir.path().join("b.txt"), "bravo").unwrap();
 
-    let mut bg = BackgroundManager::new();
+    let bg = BackgroundManager::new();
 
     // Kick off two background commands
     let id1 = bg.run(&format!("cat {}/a.txt", dir.path().display()));
@@ -602,9 +602,10 @@ fn scenario_11_long_session_with_compaction_and_planning() {
         TodoItem { id: "1".into(), text: "Set up project structure".into(), status: "in_progress".into() },
     ]).unwrap();
 
-    // Build a conversation that would trigger compaction
+    // Build a conversation that would trigger compaction (more than KEEP_RECENT tool results)
+    let tool_count = memory::KEEP_RECENT + 5;
     let mut messages: Vec<serde_json::Value> = Vec::new();
-    for i in 0..10 {
+    for i in 0..tool_count {
         messages.push(serde_json::json!({"role": "user", "content": format!("step {}", i)}));
         messages.push(serde_json::json!({
             "role": "assistant",
@@ -642,8 +643,8 @@ fn scenario_11_long_session_with_compaction_and_planning() {
             }
         }
     }
-    assert_eq!(full_count, 3, "keep KEEP_RECENT=3 full results");
-    assert_eq!(placeholder_count, 7, "7 old results should be placeholders");
+    assert_eq!(full_count, memory::KEEP_RECENT, "keep KEEP_RECENT full results");
+    assert_eq!(placeholder_count, 5, "5 old results should be placeholders");
 
     // Update todo progress
     todo.update(vec![
@@ -670,7 +671,7 @@ fn scenario_12_background_with_team_notification() {
     fs::create_dir(&inbox_dir).unwrap();
 
     let bus = MessageBus::new(&inbox_dir);
-    let mut bg = BackgroundManager::new();
+    let bg = BackgroundManager::new();
 
     // Spawn background build
     let build_result = bg.run("echo BUILD_OK");

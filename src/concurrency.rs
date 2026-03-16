@@ -18,23 +18,36 @@ pub struct Notification {
     pub result: String,
 }
 
+/// Truncate a string at a char boundary, avoiding panics on multi-byte UTF-8.
+fn truncate_str(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
+    }
+}
+
 pub struct BackgroundManager {
-    pub tasks: HashMap<String, TaskInfo>,
+    tasks: Arc<Mutex<HashMap<String, TaskInfo>>>,
     notification_queue: Arc<Mutex<Vec<Notification>>>,
 }
 
 impl BackgroundManager {
     pub fn new() -> Self {
         Self {
-            tasks: HashMap::new(),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
             notification_queue: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// Start a background thread, return task_id immediately.
-    pub fn run(&mut self, command: &str) -> String {
+    pub fn run(&self, command: &str) -> String {
         let task_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
-        self.tasks.insert(
+        self.tasks.lock().unwrap().insert(
             task_id.clone(),
             TaskInfo {
                 status: "running".to_string(),
@@ -44,6 +57,7 @@ impl BackgroundManager {
         );
 
         let queue = Arc::clone(&self.notification_queue);
+        let tasks = Arc::clone(&self.tasks);
         let tid = task_id.clone();
         let cmd = command.to_string();
 
@@ -59,43 +73,42 @@ impl BackgroundManager {
                     let combined = format!("{}{}", stdout, stderr).trim().to_string();
                     let result = if combined.is_empty() {
                         "(no output)".to_string()
-                    } else if combined.len() > 50000 {
-                        combined[..50000].to_string()
                     } else {
-                        combined
+                        truncate_str(&combined, 50000).to_string()
                     };
                     ("completed".to_string(), result)
                 }
                 Err(e) => ("error".to_string(), format!("Error: {}", e)),
             };
 
+            // Update the task entry so check() reflects completion
+            if let Ok(mut t) = tasks.lock() {
+                if let Some(info) = t.get_mut(&tid) {
+                    info.status = status.clone();
+                    info.result = output.clone();
+                }
+            }
+
             let mut q = queue.lock().unwrap();
             q.push(Notification {
-                task_id: tid.clone(),
-                status: status.clone(),
-                command: if cmd.len() > 80 {
-                    cmd[..80].to_string()
-                } else {
-                    cmd.clone()
-                },
-                result: if output.len() > 500 {
-                    output[..500].to_string()
-                } else {
-                    output.clone()
-                },
+                task_id: tid,
+                status,
+                command: truncate_str(&cmd, 80).to_string(),
+                result: truncate_str(&output, 500).to_string(),
             });
         });
 
-        format!("Background task {} started: {}", task_id, &command[..command.len().min(80)])
+        format!("Background task {} started: {}", task_id, truncate_str(command, 80))
     }
 
     /// Check status of one task.
     pub fn check(&self, task_id: &str) -> String {
-        match self.tasks.get(task_id) {
+        let tasks = self.tasks.lock().unwrap();
+        match tasks.get(task_id) {
             Some(t) => format!(
                 "[{}] {}\n{}",
                 t.status,
-                &t.command[..t.command.len().min(60)],
+                truncate_str(&t.command, 60),
                 if t.result.is_empty() {
                     "(running)"
                 } else {
@@ -109,19 +122,7 @@ impl BackgroundManager {
     /// Return and clear all pending completion notifications.
     pub fn drain_notifications(&self) -> Vec<Notification> {
         let mut q = self.notification_queue.lock().unwrap();
-        let notifs: Vec<Notification> = q.drain(..).collect();
-        notifs
+        q.drain(..).collect()
     }
 }
 
-// Convert Notification to a HashMap-like structure for tests
-impl Notification {
-    pub fn to_map(&self) -> HashMap<String, String> {
-        let mut m = HashMap::new();
-        m.insert("task_id".to_string(), self.task_id.clone());
-        m.insert("status".to_string(), self.status.clone());
-        m.insert("command".to_string(), self.command.clone());
-        m.insert("result".to_string(), self.result.clone());
-        m
-    }
-}

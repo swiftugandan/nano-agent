@@ -770,7 +770,7 @@ fn main() {
 
         // L5: Token estimation and memory compaction
         let token_count = memory::estimate_tokens(&messages);
-        if token_count > 20_000 {
+        if token_count > 80_000 {
             memory::micro_compact(&mut messages);
         }
         if token_count > memory::THRESHOLD {

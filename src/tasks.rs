@@ -62,10 +62,13 @@ impl TaskManager {
 
     fn load(&self, task_id: i64) -> Result<Task, AgentError> {
         let path = self.task_path(task_id);
-        if !path.exists() {
-            return Err(AgentError::NotFound(format!("Task {} not found", task_id)));
-        }
-        let content = std::fs::read_to_string(&path)?;
+        let content = std::fs::read_to_string(&path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                AgentError::NotFound(format!("Task {} not found", task_id))
+            } else {
+                AgentError::Io(e)
+            }
+        })?;
         let task: Task =
             serde_json::from_str(&content).map_err(|e| AgentError::ValueError(e.to_string()))?;
         Ok(task)
@@ -149,47 +152,23 @@ impl TaskManager {
         Ok(serde_json::to_string_pretty(&task).unwrap())
     }
 
+    /// Load all tasks from the directory.
+    pub fn load_all(&self) -> Vec<Task> {
+        load_all_tasks(&self.dir)
+    }
+
     fn clear_dependency(&self, completed_id: i64) -> Result<(), AgentError> {
-        if let Ok(entries) = std::fs::read_dir(&self.dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map_or(false, |n| n.starts_with("task_") && n.ends_with(".json"))
-                {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        if let Ok(mut task) = serde_json::from_str::<Task>(&content) {
-                            if task.blocked_by.contains(&completed_id) {
-                                task.blocked_by.retain(|&id| id != completed_id);
-                                self.save(&task)?;
-                            }
-                        }
-                    }
-                }
+        for mut task in self.load_all() {
+            if task.blocked_by.contains(&completed_id) {
+                task.blocked_by.retain(|&id| id != completed_id);
+                self.save(&task)?;
             }
         }
         Ok(())
     }
 
     pub fn list_all(&self) -> String {
-        let mut tasks: Vec<Task> = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&self.dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map_or(false, |n| n.starts_with("task_") && n.ends_with(".json"))
-                {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        if let Ok(task) = serde_json::from_str::<Task>(&content) {
-                            tasks.push(task);
-                        }
-                    }
-                }
-            }
-        }
+        let mut tasks = self.load_all();
         tasks.sort_by_key(|t| t.id);
         if tasks.is_empty() {
             return "No tasks.".to_string();
@@ -239,4 +218,23 @@ impl TaskManager {
     pub fn update_status(&self, task_id: i64, status: &str) -> Result<String, AgentError> {
         self.update(task_id, Some(status), None, None)
     }
+}
+
+/// Load all task JSON files from a directory. Shared by TaskManager and autonomy.
+pub fn load_all_tasks(dir: &Path) -> Vec<Task> {
+    let mut tasks = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("task_") && name_str.ends_with(".json") {
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    if let Ok(task) = serde_json::from_str::<Task>(&content) {
+                        tasks.push(task);
+                    }
+                }
+            }
+        }
+    }
+    tasks
 }
