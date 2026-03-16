@@ -2,6 +2,9 @@
 
 A Rust-based autonomous coding agent that runs an interactive loop with an LLM, using tools for file I/O, planning, tasks, background execution, team messaging, subagent delegation, and git worktree isolation.
 
+**Code index:** [DeepWiki — swiftugandan/nano-agent](https://deepwiki.com/swiftugandan/nano-agent)  
+**Original inspiration:** [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) — *Bash is all you need: a nano Claude Code–like agent, built from 0 to 1*
+
 ## Requirements
 
 - **Rust** (2021 edition)
