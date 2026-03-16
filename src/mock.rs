@@ -1,0 +1,99 @@
+use crate::types::*;
+use std::collections::VecDeque;
+
+/// Mock LLM that returns pre-queued responses. Mirrors Python conftest.py MockLLM.
+pub struct MockLLM {
+    responses: VecDeque<LlmResponse>,
+    call_count: usize,
+    calls: Vec<LlmParams>,
+}
+
+impl MockLLM {
+    pub fn new() -> Self {
+        Self {
+            responses: VecDeque::new(),
+            call_count: 0,
+            calls: Vec::new(),
+        }
+    }
+
+    /// Queue a response with the given stop_reason and content blocks.
+    pub fn queue(&mut self, stop_reason: &str, content: Vec<ContentBlock>) {
+        self.responses.push_back(LlmResponse {
+            content,
+            stop_reason: stop_reason.to_string(),
+        });
+    }
+
+    /// Queue the same response `count` times, replacing `{i}` in tool_use ids.
+    pub fn queue_repeat(&mut self, stop_reason: &str, content: Vec<ContentBlock>, count: usize) {
+        for i in 0..count {
+            let adjusted: Vec<ContentBlock> = content
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::ToolUse { id, name, input } => ContentBlock::ToolUse {
+                        id: id.replace("{i}", &i.to_string()),
+                        name: name.clone(),
+                        input: input.clone(),
+                    },
+                    other => other.clone(),
+                })
+                .collect();
+            self.queue(stop_reason, adjusted);
+        }
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.call_count
+    }
+
+    pub fn calls(&self) -> &[LlmParams] {
+        &self.calls
+    }
+}
+
+impl Llm for MockLLM {
+    fn create(&mut self, params: LlmParams) -> LlmResponse {
+        self.calls.push(params);
+        self.call_count += 1;
+        if let Some(response) = self.responses.pop_front() {
+            response
+        } else {
+            LlmResponse {
+                content: vec![ContentBlock::Text {
+                    text: "(no more responses)".to_string(),
+                }],
+                stop_reason: "end_turn".to_string(),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+/// Create a dispatch map from {name: return_value} pairs.
+pub fn make_dispatch(handlers: std::collections::HashMap<String, String>) -> Dispatch {
+    let mut dispatch: Dispatch = std::collections::HashMap::new();
+    for (name, val) in handlers {
+        dispatch.insert(name, Box::new(move |_input| val.clone()));
+    }
+    dispatch
+}
+
+/// Create a text content block.
+pub fn make_text_block(text: &str) -> ContentBlock {
+    ContentBlock::Text {
+        text: text.to_string(),
+    }
+}
+
+/// Create a tool_use content block.
+pub fn make_tool_use_block(id: &str, name: &str, input: serde_json::Value) -> ContentBlock {
+    ContentBlock::ToolUse {
+        id: id.to_string(),
+        name: name.to_string(),
+        input,
+    }
+}
