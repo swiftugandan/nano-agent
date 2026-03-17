@@ -215,11 +215,17 @@ impl Channel for WebSocketChannel {
     }
 
     fn recv(&self) -> Option<InboundMessage> {
-        self.incoming.lock().unwrap().pop_front()
+        self.incoming
+            .lock()
+            .expect("Gateway incoming lock poisoned")
+            .pop_front()
     }
 
     fn send(&self, peer_id: &str, text: &str) -> Result<(), String> {
-        let mut conns = self.connections.lock().unwrap();
+        let mut conns = self
+            .connections
+            .lock()
+            .expect("Gateway connections lock poisoned");
         if let Some(stream) = conns.get_mut(peer_id) {
             write_ws_frame(stream, text)
         } else {
@@ -255,17 +261,20 @@ impl Gateway {
 
     /// Bind a (channel, peer) to an agent.
     pub fn bind(&self, channel: &str, peer_id: &str, agent: &str) {
-        self.bindings.lock().unwrap().insert(
-            (channel.to_string(), peer_id.to_string()),
-            agent.to_string(),
-        );
+        self.bindings
+            .lock()
+            .expect("Gateway bindings lock poisoned")
+            .insert(
+                (channel.to_string(), peer_id.to_string()),
+                agent.to_string(),
+            );
     }
 
     /// Look up which agent handles a (channel, peer).
     pub fn resolve(&self, channel: &str, peer_id: &str) -> Option<String> {
         self.bindings
             .lock()
-            .unwrap()
+            .expect("Gateway bindings lock poisoned")
             .get(&(channel.to_string(), peer_id.to_string()))
             .cloned()
     }
@@ -345,7 +354,10 @@ fn handle_ws_connection(
 
     // Register connection
     if let Ok(cloned) = stream.try_clone() {
-        connections.lock().unwrap().insert(peer_id.clone(), cloned);
+        connections
+            .lock()
+            .expect("Gateway connections lock poisoned")
+            .insert(peer_id.clone(), cloned);
     }
 
     // Read loop
@@ -361,7 +373,7 @@ fn handle_ws_connection(
                     media: Vec::new(),
                     raw: serde_json::Value::Null,
                 };
-                let mut queue = incoming.lock().unwrap();
+                let mut queue = incoming.lock().expect("Gateway incoming lock poisoned");
                 if queue.len() < MAX_INCOMING_QUEUE {
                     queue.push_back(msg);
                 } else {
@@ -370,7 +382,10 @@ fn handle_ws_connection(
             }
             None => {
                 // Connection closed
-                connections.lock().unwrap().remove(&peer_id);
+                connections
+                    .lock()
+                    .expect("Gateway connections lock poisoned")
+                    .remove(&peer_id);
                 break;
             }
         }

@@ -151,11 +151,11 @@ impl DeliveryRunner {
             }
 
             // Attempt delivery
-            let result = self.channel_manager.lock().unwrap().send(
-                &item.channel,
-                &item.peer_id,
-                &item.payload,
-            );
+            let result = self
+                .channel_manager
+                .lock()
+                .expect("ChannelManager lock poisoned")
+                .send(&item.channel, &item.peer_id, &item.payload);
 
             match result {
                 Ok(()) => {

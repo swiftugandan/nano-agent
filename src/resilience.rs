@@ -288,3 +288,172 @@ impl Llm for ContextGuard {
         self.inner.create(params3)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mock::MockLLM;
+    use crate::types::ContentBlock;
+
+    fn quick_policy() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 3,
+            base_delay_ms: 1, // 1ms for tests
+            max_delay_ms: 10,
+            jitter_factor: 0.0,
+        }
+    }
+
+    fn text_response() -> LlmResponse {
+        LlmResponse {
+            content: vec![ContentBlock::Text {
+                text: "ok".to_string(),
+            }],
+            stop_reason: "end_turn".to_string(),
+        }
+    }
+
+    fn make_params() -> LlmParams {
+        LlmParams {
+            model: "test".to_string(),
+            system: "sys".to_string(),
+            messages: vec![],
+            tools: vec![],
+            max_tokens: 100,
+        }
+    }
+
+    #[test]
+    fn resilient_success_path() {
+        let mut mock = MockLLM::new();
+        mock.queue(
+            "end_turn",
+            vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
+        );
+
+        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty());
+        let resp = llm.create(make_params()).unwrap();
+        assert_eq!(resp.stop_reason, "end_turn");
+    }
+
+    #[test]
+    fn resilient_transient_then_success() {
+        let mut mock = MockLLM::new();
+        mock.queue_error(LlmError::Transient {
+            status: 429,
+            message: "rate limited".into(),
+        });
+        mock.queue("end_turn", vec![ContentBlock::Text { text: "ok".into() }]);
+
+        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty());
+        let resp = llm.create(make_params()).unwrap();
+        assert_eq!(resp.stop_reason, "end_turn");
+    }
+
+    #[test]
+    fn resilient_max_retries_exhausted() {
+        let mut mock = MockLLM::new();
+        for _ in 0..3 {
+            mock.queue_error(LlmError::Transient {
+                status: 503,
+                message: "unavailable".into(),
+            });
+        }
+
+        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty());
+        let err = llm.create(make_params()).unwrap_err();
+        assert!(matches!(err, LlmError::Transient { .. }));
+    }
+
+    #[test]
+    fn resilient_overflow_not_retried() {
+        let mut mock = MockLLM::new();
+        mock.queue_error(LlmError::Overflow {
+            message: "too long".into(),
+        });
+
+        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty());
+        let err = llm.create(make_params()).unwrap_err();
+        assert!(matches!(err, LlmError::Overflow { .. }));
+    }
+
+    #[test]
+    fn resilient_fatal_not_retried() {
+        let mut mock = MockLLM::new();
+        mock.queue_error(LlmError::Fatal {
+            message: "bad request".into(),
+        });
+
+        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty());
+        let err = llm.create(make_params()).unwrap_err();
+        assert!(matches!(err, LlmError::Fatal { .. }));
+    }
+
+    #[test]
+    fn context_guard_normal_passthrough() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mock = MockLLM::new();
+        mock.queue(
+            "end_turn",
+            vec![ContentBlock::Text {
+                text: "fine".into(),
+            }],
+        );
+
+        let mut guard = ContextGuard::new(Box::new(mock), dir.path());
+        let resp = guard.create(make_params()).unwrap();
+        assert_eq!(resp.stop_reason, "end_turn");
+    }
+
+    #[test]
+    fn context_guard_overflow_triggers_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mock = MockLLM::new();
+        // First call: overflow
+        mock.queue_error(LlmError::Overflow {
+            message: "context too long".into(),
+        });
+        // Stage 2 retry after truncation: success
+        mock.queue(
+            "end_turn",
+            vec![ContentBlock::Text {
+                text: "recovered".into(),
+            }],
+        );
+
+        let mut guard = ContextGuard::new(Box::new(mock), dir.path());
+
+        // Build params with a large tool_result to trigger truncation
+        let mut params = make_params();
+        params.messages = vec![
+            crate::types::Message {
+                role: "user".into(),
+                content: crate::types::MessageContent::Text("hi".into()),
+            },
+            crate::types::Message {
+                role: "assistant".into(),
+                content: crate::types::MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({}),
+                }]),
+            },
+            crate::types::Message {
+                role: "user".into(),
+                content: crate::types::MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "x".repeat(5000), // oversized
+                }]),
+            },
+        ];
+
+        let resp = guard.create(params).unwrap();
+        assert_eq!(resp.stop_reason, "end_turn");
+    }
+}

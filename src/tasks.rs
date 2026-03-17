@@ -1,7 +1,7 @@
 use crate::types::AgentError;
 use serde::{Deserialize, Serialize};
-use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
@@ -22,7 +22,7 @@ pub struct Task {
 
 pub struct TaskManager {
     pub dir: PathBuf,
-    next_id: Cell<i64>,
+    next_id: AtomicI64,
 }
 
 impl TaskManager {
@@ -31,7 +31,7 @@ impl TaskManager {
         let max_id = Self::max_id(dir);
         Self {
             dir: dir.to_path_buf(),
-            next_id: Cell::new(max_id + 1),
+            next_id: AtomicI64::new(max_id + 1),
         }
     }
 
@@ -83,7 +83,7 @@ impl TaskManager {
     }
 
     pub fn create(&self, subject: &str) -> String {
-        let id = self.next_id.get();
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let task = Task {
             id,
             subject: subject.to_string(),
@@ -95,7 +95,6 @@ impl TaskManager {
             worktree: String::new(),
         };
         self.save(&task).ok();
-        self.next_id.set(id + 1);
         serde_json::to_string_pretty(&task).unwrap()
     }
 
@@ -217,6 +216,101 @@ impl TaskManager {
 
     pub fn update_status(&self, task_id: i64, status: &str) -> Result<String, AgentError> {
         self.update(task_id, Some(status), None, None)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup() -> (tempfile::TempDir, TaskManager) {
+        let dir = tempfile::tempdir().unwrap();
+        let tm = TaskManager::new(dir.path());
+        (dir, tm)
+    }
+
+    #[test]
+    fn create_and_get() {
+        let (_dir, tm) = setup();
+        let json = tm.create("My first task");
+        let task: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(task.id, 1);
+        assert_eq!(task.subject, "My first task");
+        assert_eq!(task.status, "pending");
+
+        // get returns the same task
+        let got: Task = serde_json::from_str(&tm.get(1)).unwrap();
+        assert_eq!(got.subject, "My first task");
+    }
+
+    #[test]
+    fn list_all_ordered() {
+        let (_dir, tm) = setup();
+        tm.create("Alpha");
+        tm.create("Beta");
+        tm.create("Gamma");
+        let listing = tm.list_all();
+        assert!(listing.contains("#1: Alpha"));
+        assert!(listing.contains("#2: Beta"));
+        assert!(listing.contains("#3: Gamma"));
+    }
+
+    #[test]
+    fn update_status() {
+        let (_dir, tm) = setup();
+        tm.create("Task A");
+        tm.update(1, Some("in_progress"), None, None).unwrap();
+        let task: Task = serde_json::from_str(&tm.get(1)).unwrap();
+        assert_eq!(task.status, "in_progress");
+    }
+
+    #[test]
+    fn update_invalid_status() {
+        let (_dir, tm) = setup();
+        tm.create("Task A");
+        let result = tm.update(1, Some("invalid"), None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dependencies() {
+        let (_dir, tm) = setup();
+        tm.create("Blocker");
+        tm.create("Blocked");
+        tm.update(2, None, Some(&[1]), None).unwrap();
+
+        let task: Task = serde_json::from_str(&tm.get(2)).unwrap();
+        assert!(task.blocked_by.contains(&1));
+
+        // Completing the blocker clears the dependency
+        tm.update(1, Some("completed"), None, None).unwrap();
+        let task: Task = serde_json::from_str(&tm.get(2)).unwrap();
+        assert!(task.blocked_by.is_empty());
+    }
+
+    #[test]
+    fn bind_worktree() {
+        let (_dir, tm) = setup();
+        tm.create("Worktree task");
+        tm.bind_worktree(1, "/tmp/wt-123").unwrap();
+        let task: Task = serde_json::from_str(&tm.get(1)).unwrap();
+        assert_eq!(task.worktree, "/tmp/wt-123");
+        assert_eq!(task.status, "in_progress"); // auto-promoted from pending
+
+        tm.unbind_worktree(1).unwrap();
+        let task: Task = serde_json::from_str(&tm.get(1)).unwrap();
+        assert!(task.worktree.is_empty());
+    }
+
+    #[test]
+    fn get_nonexistent() {
+        let (_dir, tm) = setup();
+        let result = tm.get(999);
+        assert!(result.contains("Error"));
     }
 }
 

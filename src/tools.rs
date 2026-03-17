@@ -4,11 +4,18 @@ use std::collections::HashMap;
 use std::io::Read as IoRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
 /// Return the JSON schema definitions for the built-in tools.
+/// Cached after first call to avoid rebuilding static JSON each time.
 pub fn tool_definitions() -> Vec<serde_json::Value> {
+    static DEFS: OnceLock<Vec<serde_json::Value>> = OnceLock::new();
+    DEFS.get_or_init(tool_definitions_inner).clone()
+}
+
+fn tool_definitions_inner() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
             "name": "bash",
@@ -580,4 +587,322 @@ pub fn build_dispatch(workspace: &Path) -> Dispatch {
     );
 
     dispatch
+}
+
+// ---------------------------------------------------------------------------
+// Extended tool definitions (L2–L11)
+// ---------------------------------------------------------------------------
+
+/// Return extended tool definitions (L2–L11).
+/// Cached after first call to avoid rebuilding static JSON each time.
+pub fn extended_tool_definitions() -> Vec<serde_json::Value> {
+    static DEFS: OnceLock<Vec<serde_json::Value>> = OnceLock::new();
+    DEFS.get_or_init(extended_tool_definitions_inner).clone()
+}
+
+fn extended_tool_definitions_inner() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "todo_update",
+            "description": "Update the todo list. Only one item may be in_progress at a time.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id":     { "type": "string" },
+                                "text":   { "type": "string" },
+                                "status": { "type": "string", "enum": ["pending","in_progress","completed"] }
+                            },
+                            "required": ["id","text","status"]
+                        }
+                    }
+                },
+                "required": ["items"]
+            }
+        }),
+        serde_json::json!({
+            "name": "todo_read",
+            "description": "Read the current todo list.",
+            "input_schema": { "type": "object", "properties": {} }
+        }),
+        serde_json::json!({
+            "name": "read_skill",
+            "description": "Load a skill by name and return its full content.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Skill name" }
+                },
+                "required": ["name"]
+            }
+        }),
+        serde_json::json!({
+            "name": "task_create",
+            "description": "Create a new task with a subject.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "subject": { "type": "string" }
+                },
+                "required": ["subject"]
+            }
+        }),
+        serde_json::json!({
+            "name": "task_get",
+            "description": "Get a task by ID.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "integer" }
+                },
+                "required": ["task_id"]
+            }
+        }),
+        serde_json::json!({
+            "name": "task_update",
+            "description": "Update a task's status or dependencies.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "task_id":        { "type": "integer" },
+                    "status":         { "type": "string", "enum": ["pending","in_progress","completed"] },
+                    "add_blocked_by": { "type": "array", "items": { "type": "integer" } },
+                    "add_blocks":     { "type": "array", "items": { "type": "integer" } }
+                },
+                "required": ["task_id"]
+            }
+        }),
+        serde_json::json!({
+            "name": "task_list",
+            "description": "List all tasks with their status and dependencies.",
+            "input_schema": { "type": "object", "properties": {} }
+        }),
+        serde_json::json!({
+            "name": "background_run",
+            "description": "Run a shell command in the background. Returns a task ID immediately.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "lane": { "type": "string", "description": "Lane name (default: 'background'). Available: main, cron, background" }
+                },
+                "required": ["command"]
+            }
+        }),
+        serde_json::json!({
+            "name": "background_check",
+            "description": "Check the status and result of a background task.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" }
+                },
+                "required": ["task_id"]
+            }
+        }),
+        serde_json::json!({
+            "name": "send_message",
+            "description": "Send a message to a teammate via the message bus.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "to":      { "type": "string", "description": "Recipient name" },
+                    "content": { "type": "string" }
+                },
+                "required": ["to","content"]
+            }
+        }),
+        serde_json::json!({
+            "name": "broadcast_message",
+            "description": "Broadcast a message to all teammates.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string" }
+                },
+                "required": ["content"]
+            }
+        }),
+        serde_json::json!({
+            "name": "read_inbox",
+            "description": "Read and clear your inbox messages.",
+            "input_schema": { "type": "object", "properties": {} }
+        }),
+        serde_json::json!({
+            "name": "list_teammates",
+            "description": "List all team members and their roles.",
+            "input_schema": { "type": "object", "properties": {} }
+        }),
+        serde_json::json!({
+            "name": "spawn_teammate",
+            "description": "Create or reactivate a teammate.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name":   { "type": "string" },
+                    "role":   { "type": "string" },
+                    "prompt": { "type": "string" }
+                },
+                "required": ["name","role","prompt"]
+            }
+        }),
+        serde_json::json!({
+            "name": "shutdown_teammate",
+            "description": "Request a teammate to shut down (requires their approval).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "teammate": { "type": "string" }
+                },
+                "required": ["teammate"]
+            }
+        }),
+        serde_json::json!({
+            "name": "review_plan",
+            "description": "Approve or reject a pending plan request.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "request_id": { "type": "string" },
+                    "approve":    { "type": "boolean" },
+                    "feedback":   { "type": "string" }
+                },
+                "required": ["request_id","approve","feedback"]
+            }
+        }),
+        serde_json::json!({
+            "name": "worktree_create",
+            "description": "Create a git worktree, optionally bound to a task.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name":    { "type": "string", "description": "Worktree name (letters, numbers, .-_)" },
+                    "task_id": { "type": "integer", "description": "Optional task to bind" }
+                },
+                "required": ["name"]
+            }
+        }),
+        serde_json::json!({
+            "name": "worktree_remove",
+            "description": "Remove a git worktree.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name":          { "type": "string" },
+                    "complete_task": { "type": "boolean", "description": "Mark bound task as completed" }
+                },
+                "required": ["name"]
+            }
+        }),
+        serde_json::json!({
+            "name": "list_events",
+            "description": "List recent events from the event log.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "Number of events (default 20)" }
+                }
+            }
+        }),
+        serde_json::json!({
+            "name": "scan_tasks",
+            "description": "Scan for unclaimed tasks (pending, no owner, not blocked).",
+            "input_schema": { "type": "object", "properties": {} }
+        }),
+        serde_json::json!({
+            "name": "claim_task",
+            "description": "Claim an unclaimed task, setting yourself as owner.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "integer" }
+                },
+                "required": ["task_id"]
+            }
+        }),
+        serde_json::json!({
+            "name": "subagent",
+            "description": "Spawn an isolated subagent to handle a subtask. Returns only its final text output.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "Task description for the subagent" }
+                },
+                "required": ["prompt"]
+            }
+        }),
+        serde_json::json!({
+            "name": "compact",
+            "description": "Trigger on-demand conversation compaction. Saves the current transcript and replaces messages with a summary. Use when the conversation is getting long and you want to free up context.",
+            "input_schema": { "type": "object", "properties": {} }
+        }),
+        serde_json::json!({
+            "name": "idle",
+            "description": "Transition from WORK to IDLE phase. Use when you have completed your current task and are waiting for new work. Only available to teammates, not the lead agent.",
+            "input_schema": { "type": "object", "properties": {} }
+        }),
+        serde_json::json!({
+            "name": "cron_add",
+            "description": "Add a scheduled cron job. The prompt will be injected as a user message when the cron fires.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name":   { "type": "string", "description": "Unique name for this cron entry" },
+                    "cron":   { "type": "string", "description": "Cron expression: minute hour day month weekday (e.g. '*/5 * * * *')" },
+                    "prompt": { "type": "string", "description": "Prompt to inject when cron fires" }
+                },
+                "required": ["name", "cron", "prompt"]
+            }
+        }),
+        serde_json::json!({
+            "name": "cron_remove",
+            "description": "Remove a scheduled cron job by name.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                },
+                "required": ["name"]
+            }
+        }),
+        serde_json::json!({
+            "name": "cron_list",
+            "description": "List all cron entries with their schedules and enabled status.",
+            "input_schema": { "type": "object", "properties": {} }
+        }),
+        serde_json::json!({
+            "name": "save_memory",
+            "description": "Save a memory for future recall. Memories are searchable via TF-IDF.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "The memory content to save" },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional tags for categorization"
+                    }
+                },
+                "required": ["text"]
+            }
+        }),
+        serde_json::json!({
+            "name": "enqueue_delivery",
+            "description": "Enqueue a message for reliable delivery to a channel+peer. Retries with exponential backoff.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "channel":      { "type": "string", "description": "Target channel name (e.g. 'cli', 'websocket')" },
+                    "peer_id":      { "type": "string", "description": "Target peer identifier" },
+                    "payload":      { "type": "string", "description": "Message payload to deliver" },
+                    "max_attempts": { "type": "integer", "description": "Max delivery attempts (default 5)" }
+                },
+                "required": ["channel", "peer_id", "payload"]
+            }
+        }),
+    ]
 }

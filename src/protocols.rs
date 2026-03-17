@@ -39,15 +39,24 @@ impl RequestTracker {
     }
 
     pub fn clear(&self) {
-        self.shutdown_requests.lock().unwrap().clear();
-        self.plan_requests.lock().unwrap().clear();
+        self.shutdown_requests
+            .lock()
+            .expect("shutdown_requests lock poisoned")
+            .clear();
+        self.plan_requests
+            .lock()
+            .expect("plan_requests lock poisoned")
+            .clear();
     }
 
     /// Send a shutdown request to a teammate. Returns status string.
     pub fn handle_shutdown_request(&self, bus: &MessageBus, teammate: &str) -> String {
         let req_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
         {
-            let mut reqs = self.shutdown_requests.lock().unwrap();
+            let mut reqs = self
+                .shutdown_requests
+                .lock()
+                .expect("shutdown_requests lock poisoned");
             reqs.insert(
                 req_id.clone(),
                 ShutdownRequest {
@@ -79,7 +88,10 @@ impl RequestTracker {
     ) -> String {
         let from_name;
         {
-            let mut reqs = self.plan_requests.lock().unwrap();
+            let mut reqs = self
+                .plan_requests
+                .lock()
+                .expect("plan_requests lock poisoned");
             match reqs.get_mut(request_id) {
                 Some(req) => {
                     req.status = if approve {

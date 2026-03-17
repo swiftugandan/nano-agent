@@ -179,6 +179,25 @@ impl MemoryStore {
         entries
     }
 
+    /// Remove daily JSONL files older than `max_age_days`.
+    pub fn evict_old(&self, max_age_days: u64) -> usize {
+        let cutoff = chrono::Local::now() - chrono::Duration::days(max_age_days as i64);
+        let cutoff_str = cutoff.format("%Y-%m-%d").to_string();
+        let mut removed = 0;
+
+        // Filenames are dates: "2025-01-15.jsonl"
+        for path in crate::util::list_files_matching(&self.dynamic_dir, "", ".jsonl") {
+            let name = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            if name < cutoff_str.as_str() && fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// Load the static MEMORY.md content.
     pub fn load_static(&self) -> String {
         fs::read_to_string(&self.static_path).unwrap_or_default()
@@ -252,5 +271,33 @@ mod tests {
         let results = store.recall("JWT authentication", 2);
         assert!(!results.is_empty());
         assert!(results[0].text.contains("JWT"));
+    }
+
+    #[test]
+    fn test_evict_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let static_path = dir.path().join("MEMORY.md");
+        let dynamic_dir = dir.path().join("memories");
+        let store = MemoryStore::new(&static_path, &dynamic_dir);
+
+        // Create a "today" file (should survive)
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        fs::write(dynamic_dir.join(format!("{}.jsonl", today)), "{}").unwrap();
+
+        // Create an "old" file (should be evicted)
+        fs::write(dynamic_dir.join("2020-01-01.jsonl"), "{}").unwrap();
+
+        // Create a non-JSONL file (should survive)
+        fs::write(dynamic_dir.join("notes.txt"), "keep").unwrap();
+
+        let removed = store.evict_old(90);
+        assert_eq!(removed, 1);
+
+        // Today's file still exists
+        assert!(dynamic_dir.join(format!("{}.jsonl", today)).exists());
+        // Old file was removed
+        assert!(!dynamic_dir.join("2020-01-01.jsonl").exists());
+        // Non-JSONL file untouched
+        assert!(dynamic_dir.join("notes.txt").exists());
     }
 }

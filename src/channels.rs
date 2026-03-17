@@ -106,7 +106,7 @@ impl CliChannel {
     /// Blocking read from the terminal. Returns `Some(text)` on success,
     /// `None` on Ctrl-C, or `Some("/quit")` on Ctrl-D / EOF.
     pub fn read_line(&self) -> Option<String> {
-        let mut editor = self.editor.lock().unwrap();
+        let mut editor = self.editor.lock().expect("Editor lock poisoned");
         match editor.read_line(&self.prompt) {
             Ok(Signal::Success(line)) => {
                 let trimmed = line.trim().to_string();

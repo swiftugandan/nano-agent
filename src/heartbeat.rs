@@ -109,7 +109,10 @@ impl CronScheduler {
     }
 
     pub fn add(&self, name: &str, cron: &str, prompt: &str) -> String {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("HeartbeatManager entries lock poisoned");
 
         // Replace if name already exists
         entries.retain(|e| e.name != name);
@@ -125,7 +128,10 @@ impl CronScheduler {
     }
 
     pub fn remove(&self, name: &str) -> String {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("HeartbeatManager entries lock poisoned");
         let before = entries.len();
         entries.retain(|e| e.name != name);
         if entries.len() == before {
@@ -136,7 +142,10 @@ impl CronScheduler {
     }
 
     pub fn list(&self) -> String {
-        let entries = self.entries.lock().unwrap();
+        let entries = self
+            .entries
+            .lock()
+            .expect("HeartbeatManager entries lock poisoned");
         if entries.is_empty() {
             return "No cron entries.".to_string();
         }
@@ -157,12 +166,18 @@ impl CronScheduler {
 
     /// Check all entries and return events that should fire now.
     pub fn tick(&self) -> Vec<HeartbeatEvent> {
-        let entries = self.entries.lock().unwrap();
+        let entries = self
+            .entries
+            .lock()
+            .expect("HeartbeatManager entries lock poisoned");
         if entries.is_empty() {
             return Vec::new();
         }
         let now = chrono::Local::now();
-        let mut last_fired = self.last_fired.lock().unwrap();
+        let mut last_fired = self
+            .last_fired
+            .lock()
+            .expect("HeartbeatManager last_fired lock poisoned");
         let mut events = Vec::new();
 
         for entry in entries.iter() {
@@ -216,7 +231,9 @@ impl HeartbeatManager {
             thread::sleep(std::time::Duration::from_secs(30));
             let events = scheduler.tick();
             if !events.is_empty() {
-                let mut p = pending.lock().unwrap();
+                let mut p = pending
+                    .lock()
+                    .expect("HeartbeatManager pending lock poisoned");
                 p.extend(events);
             }
         });
@@ -224,7 +241,10 @@ impl HeartbeatManager {
 
     /// Drain all pending heartbeat events.
     pub fn drain_events(&self) -> Vec<HeartbeatEvent> {
-        let mut p = self.pending.lock().unwrap();
+        let mut p = self
+            .pending
+            .lock()
+            .expect("HeartbeatManager pending lock poisoned");
         p.drain(..).collect()
     }
 

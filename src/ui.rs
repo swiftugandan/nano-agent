@@ -65,7 +65,7 @@ impl NanoPrompt {
 
 impl Prompt for NanoPrompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
-        let s = self.state.lock().unwrap();
+        let s = self.state.lock().expect("PromptState lock poisoned");
         let name = Style::new().bold().fg(Color::White).paint(&s.agent_name);
         let role = Style::new()
             .dimmed()
@@ -475,10 +475,10 @@ impl SpinnerHandle {
             let mut frame = 0;
             while a.load(Ordering::SeqCst) {
                 if !p.load(Ordering::SeqCst) {
-                    let _lock = o.lock().unwrap();
+                    let _lock = o.lock().expect("Spinner output lock poisoned");
                     // Double-check after acquiring lock
                     if !p.load(Ordering::SeqCst) && a.load(Ordering::SeqCst) {
-                        let lbl = l.lock().unwrap().clone();
+                        let lbl = l.lock().expect("Spinner label lock poisoned").clone();
                         print!(
                             "\r {}{}{} {}...   ",
                             DIM_CYAN, SPINNER_FRAMES[frame], RESET, lbl
@@ -504,13 +504,16 @@ impl SpinnerHandle {
     }
 
     pub fn update_label(&self, new_label: &str) {
-        *self.label.lock().unwrap() = new_label.to_string();
+        *self.label.lock().expect("Spinner label lock poisoned") = new_label.to_string();
     }
 
     /// Pause spinner and clear its line. Safe to print tool output after this.
     pub fn pause_and_clear(&self) {
         self.paused.store(true, Ordering::SeqCst);
-        let _lock = self.output_lock.lock().unwrap();
+        let _lock = self
+            .output_lock
+            .lock()
+            .expect("Spinner output lock poisoned");
         print!("\r{}\r", " ".repeat(60));
         std::io::stdout().flush().ok();
     }

@@ -1,10 +1,12 @@
 pub mod anthropic;
 pub mod autonomy;
 pub mod channels;
+pub mod cli;
 pub mod concurrency;
 pub mod core_loop;
 pub mod delegation;
 pub mod delivery;
+pub mod dispatch;
 pub mod gateway;
 pub mod heartbeat;
 pub mod isolation;

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 pub const KEEP_RECENT: usize = 10;
 pub const THRESHOLD: usize = 180_000;
+pub const MICRO_COMPACT_THRESHOLD: usize = 80_000;
 
 /// Rough token count: ~4 chars per token.
 pub fn estimate_tokens(messages: &[serde_json::Value]) -> usize {
@@ -343,6 +344,38 @@ impl SessionStore {
         messages
     }
 
+    /// Remove session files older than `max_age_days` based on file modification time.
+    pub fn evict_old_sessions(session_dir: &Path, max_age_days: u64) -> usize {
+        let cutoff =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(max_age_days * 86_400);
+        let mut removed = 0;
+
+        for path in crate::util::list_files_matching(session_dir, "session_", ".jsonl") {
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if let Ok(modified) = meta.modified() {
+                    if modified < cutoff && std::fs::remove_file(&path).is_ok() {
+                        removed += 1;
+                    }
+                }
+            }
+        }
+        removed
+    }
+
+    /// Rotate the current session file if it exceeds `max_bytes`.
+    /// Renames to `.bak` and starts fresh.
+    pub fn rotate_if_needed(&self, max_bytes: u64) -> bool {
+        if let Ok(meta) = std::fs::metadata(&self.path) {
+            if meta.len() > max_bytes {
+                let bak = self.path.with_extension("jsonl.bak");
+                if std::fs::rename(&self.path, &bak).is_ok() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// List all available sessions in a directory.
     pub fn list_sessions(session_dir: &Path) -> Vec<(String, PathBuf)> {
         let paths = crate::util::list_files_matching(session_dir, "session_", ".jsonl");
@@ -354,5 +387,67 @@ impl SessionStore {
                 Some((id.to_string(), path))
             })
             .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_evict_old_sessions_preserves_recent() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path();
+
+        // Create two recent session files
+        std::fs::write(session_dir.join("session_aaa.jsonl"), "{}").unwrap();
+        std::fs::write(session_dir.join("session_bbb.jsonl"), "{}").unwrap();
+
+        // Evict sessions older than 30 days — both are brand new so none evicted
+        let removed = SessionStore::evict_old_sessions(session_dir, 30);
+        assert_eq!(removed, 0);
+        assert!(session_dir.join("session_aaa.jsonl").exists());
+        assert!(session_dir.join("session_bbb.jsonl").exists());
+    }
+
+    #[test]
+    fn test_evict_old_sessions_ignores_non_session_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path();
+
+        // Non-session files should be untouched
+        std::fs::write(session_dir.join("notes.txt"), "keep me").unwrap();
+        std::fs::write(session_dir.join("session_test.jsonl"), "{}").unwrap();
+
+        let removed = SessionStore::evict_old_sessions(session_dir, 30);
+        assert_eq!(removed, 0);
+        assert!(session_dir.join("notes.txt").exists());
+    }
+
+    #[test]
+    fn test_rotate_if_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = SessionStore::new(dir.path(), "test-rotate");
+
+        // Write enough data to exceed threshold
+        let big_data = "x".repeat(1000);
+        for _ in 0..5 {
+            session.append_turn(&[serde_json::json!({"role": "user", "content": big_data})]);
+        }
+
+        // Should rotate if file > 1KB
+        let rotated = session.rotate_if_needed(1000);
+        assert!(rotated);
+
+        // Backup file should exist
+        let bak = dir.path().join("session_test-rotate.jsonl.bak");
+        assert!(bak.exists());
+
+        // Original path should be gone (renamed)
+        assert!(!dir.path().join("session_test-rotate.jsonl").exists());
     }
 }

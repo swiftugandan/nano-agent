@@ -4,6 +4,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
+use crate::util::truncate_at_boundary as truncate_str;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn execute_command(cmd: &str) -> (String, String) {
+    match Command::new("sh").arg("-c").arg(cmd).output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{}{}", stdout, stderr).trim().to_string();
+            let result = if combined.is_empty() {
+                "(no output)".to_string()
+            } else {
+                truncate_str(&combined, 50000).to_string()
+            };
+            ("completed".to_string(), result)
+        }
+        Err(e) => ("error".to_string(), format!("Error: {}", e)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -75,7 +98,7 @@ impl Lane {
 
     fn submit(self: &Arc<Self>, task_id: String, command: String) {
         let gen = self.generation.load(Ordering::Acquire);
-        let mut q = self.queue.lock().unwrap();
+        let mut q = self.queue.lock().expect("Lane queue lock poisoned");
         q.push_back(QueuedTask {
             task_id,
             generation: gen,
@@ -93,7 +116,7 @@ impl Lane {
             }
 
             let task = {
-                let mut q = self.queue.lock().unwrap();
+                let mut q = self.queue.lock().expect("Lane queue lock poisoned");
                 loop {
                     match q.pop_front() {
                         Some(t) => {
@@ -114,7 +137,7 @@ impl Lane {
                     self.active_count.fetch_add(1, Ordering::Release);
                     // Mark not idle
                     {
-                        let mut idle = self.idle_pair.0.lock().unwrap();
+                        let mut idle = self.idle_pair.0.lock().expect("Lane idle lock poisoned");
                         *idle = false;
                     }
                     let lane = Arc::clone(self);
@@ -134,12 +157,15 @@ impl Lane {
 
                         // Push notification and evict completed task atomically
                         {
-                            lane.notification_queue.lock().unwrap().push(Notification {
-                                task_id: tid.clone(),
-                                status,
-                                command: truncate_str(&cmd, 80).to_string(),
-                                result: truncate_str(&output, 500).to_string(),
-                            });
+                            lane.notification_queue
+                                .lock()
+                                .expect("notification queue lock poisoned")
+                                .push(Notification {
+                                    task_id: tid.clone(),
+                                    status,
+                                    command: truncate_str(&cmd, 80).to_string(),
+                                    result: truncate_str(&output, 500).to_string(),
+                                });
                             // Evict completed task from all_tasks to prevent unbounded growth
                             if let Ok(mut tasks) = lane.all_tasks.lock() {
                                 tasks.remove(&tid);
@@ -149,10 +175,15 @@ impl Lane {
                         // Decrement active, check idle, and pump — all under idle lock
                         // to prevent race between active_count check and queue check.
                         {
-                            let mut idle = lane.idle_pair.0.lock().unwrap();
+                            let mut idle =
+                                lane.idle_pair.0.lock().expect("Lane idle lock poisoned");
                             lane.active_count.fetch_sub(1, Ordering::Release);
                             let active = lane.active_count.load(Ordering::Acquire);
-                            let queue_empty = lane.queue.lock().unwrap().is_empty();
+                            let queue_empty = lane
+                                .queue
+                                .lock()
+                                .expect("Lane queue lock poisoned")
+                                .is_empty();
                             if active == 0 && queue_empty {
                                 *idle = true;
                                 lane.idle_pair.1.notify_all();
@@ -169,14 +200,14 @@ impl Lane {
 
     fn reset(&self) {
         self.generation.fetch_add(1, Ordering::Release);
-        self.queue.lock().unwrap().clear();
+        self.queue.lock().expect("Lane queue lock poisoned").clear();
     }
 
     fn wait_idle(&self) {
         let (lock, cvar) = &self.idle_pair;
-        let mut idle = lock.lock().unwrap();
+        let mut idle = lock.lock().expect("Lane idle lock poisoned");
         while !*idle {
-            idle = cvar.wait(idle).unwrap();
+            idle = cvar.wait(idle).expect("Lane idle condvar poisoned");
         }
     }
 }
@@ -241,15 +272,18 @@ impl BackgroundManager {
     pub fn run_in_lane(&self, lane: &str, command: &str) -> String {
         let task_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
 
-        self.all_tasks.lock().unwrap().insert(
-            task_id.clone(),
-            TaskInfo {
-                status: "running".to_string(),
-                result: String::new(),
-                command: command.to_string(),
-                lane: lane.to_string(),
-            },
-        );
+        self.all_tasks
+            .lock()
+            .expect("all_tasks lock poisoned")
+            .insert(
+                task_id.clone(),
+                TaskInfo {
+                    status: "running".to_string(),
+                    result: String::new(),
+                    command: command.to_string(),
+                    lane: lane.to_string(),
+                },
+            );
 
         if let Some(l) = self.lanes.get(lane) {
             l.submit(task_id.clone(), command.to_string());
@@ -275,7 +309,7 @@ impl BackgroundManager {
 
     /// Check status of one task.
     pub fn check(&self, task_id: &str) -> String {
-        let tasks = self.all_tasks.lock().unwrap();
+        let tasks = self.all_tasks.lock().expect("all_tasks lock poisoned");
         match tasks.get(task_id) {
             Some(t) => format!(
                 "[{}] {}\n{}",
@@ -293,7 +327,10 @@ impl BackgroundManager {
 
     /// Return and clear all pending completion notifications.
     pub fn drain_notifications(&self) -> Vec<Notification> {
-        let mut q = self.notification_queue.lock().unwrap();
+        let mut q = self
+            .notification_queue
+            .lock()
+            .expect("notification queue lock poisoned");
         q.drain(..).collect()
     }
 
@@ -313,24 +350,58 @@ impl BackgroundManager {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Tests
 // ---------------------------------------------------------------------------
 
-use crate::util::truncate_at_boundary as truncate_str;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn execute_command(cmd: &str) -> (String, String) {
-    match Command::new("sh").arg("-c").arg(cmd).output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let combined = format!("{}{}", stdout, stderr).trim().to_string();
-            let result = if combined.is_empty() {
-                "(no output)".to_string()
-            } else {
-                truncate_str(&combined, 50000).to_string()
-            };
-            ("completed".to_string(), result)
-        }
-        Err(e) => ("error".to_string(), format!("Error: {}", e)),
+    #[test]
+    fn run_and_check() {
+        let mgr = BackgroundManager::new();
+        let result = mgr.run("echo hello");
+        assert!(result.contains("started"));
+
+        // Wait for completion
+        mgr.wait_lane_idle(LANE_BACKGROUND);
+
+        let notifs = mgr.drain_notifications();
+        assert_eq!(notifs.len(), 1);
+        assert_eq!(notifs[0].status, "completed");
+        assert!(notifs[0].result.contains("hello"));
+    }
+
+    #[test]
+    fn lane_concurrency_respected() {
+        let mgr = BackgroundManager::new();
+        // Main lane has max_concurrency=1, so tasks run serially
+        mgr.run_in_lane(LANE_MAIN, "echo one");
+        mgr.run_in_lane(LANE_MAIN, "echo two");
+        mgr.wait_lane_idle(LANE_MAIN);
+
+        let notifs = mgr.drain_notifications();
+        assert_eq!(notifs.len(), 2);
+    }
+
+    #[test]
+    fn drain_notifications_clears() {
+        let mgr = BackgroundManager::new();
+        mgr.run("echo test");
+        mgr.wait_lane_idle(LANE_BACKGROUND);
+
+        let notifs = mgr.drain_notifications();
+        assert_eq!(notifs.len(), 1);
+
+        // Second drain should be empty
+        let notifs2 = mgr.drain_notifications();
+        assert!(notifs2.is_empty());
+    }
+
+    #[test]
+    fn unknown_task_check() {
+        let mgr = BackgroundManager::new();
+        let result = mgr.check("nonexistent");
+        assert!(result.contains("Unknown task"));
     }
 }

@@ -4,7 +4,7 @@ use crate::teams::{MessageBus, TeammateManager};
 use crate::types::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// Scan for unclaimed tasks: pending, no owner, empty blockedBy.
@@ -78,7 +78,7 @@ impl Default for LifecycleConfig {
 
 /// Bundles the shared dependencies for a teammate lifecycle.
 pub struct LifecycleContext {
-    pub teammate_manager: Arc<Mutex<TeammateManager>>,
+    pub teammate_manager: Arc<RwLock<TeammateManager>>,
     pub message_bus: Arc<MessageBus>,
     pub tasks_dir: PathBuf,
     pub transcript_dir: PathBuf,
@@ -108,8 +108,8 @@ pub fn run_teammate_lifecycle(
         // --- WORK phase ---
         idle_signal.store(false, Ordering::Release);
         ctx.teammate_manager
-            .lock()
-            .unwrap()
+            .write()
+            .expect("TeammateManager write lock poisoned")
             .set_status(&ctx.agent_name, "working");
 
         let signals = LoopSignals {
@@ -125,8 +125,8 @@ pub fn run_teammate_lifecycle(
         // If idle_signal wasn't set (i.e. LLM stopped for another reason), shut down
         if !idle_signal.load(Ordering::Acquire) {
             ctx.teammate_manager
-                .lock()
-                .unwrap()
+                .write()
+                .expect("TeammateManager write lock poisoned")
                 .set_status(&ctx.agent_name, "shutdown");
             return;
         }
@@ -134,8 +134,8 @@ pub fn run_teammate_lifecycle(
         // --- IDLE phase ---
         idle_signal.store(false, Ordering::Release);
         ctx.teammate_manager
-            .lock()
-            .unwrap()
+            .write()
+            .expect("TeammateManager write lock poisoned")
             .set_status(&ctx.agent_name, "idle");
 
         let idle_start = std::time::Instant::now();
@@ -144,8 +144,8 @@ pub fn run_teammate_lifecycle(
             // Check shutdown
             if ctx
                 .teammate_manager
-                .lock()
-                .unwrap()
+                .read()
+                .expect("TeammateManager read lock poisoned")
                 .is_shutdown_requested(&ctx.agent_name)
             {
                 return; // already marked shutdown
@@ -172,8 +172,8 @@ pub fn run_teammate_lifecycle(
             // Check timeout
             if idle_start.elapsed() >= config.idle_timeout {
                 ctx.teammate_manager
-                    .lock()
-                    .unwrap()
+                    .write()
+                    .expect("TeammateManager write lock poisoned")
                     .set_status(&ctx.agent_name, "shutdown");
                 return;
             }

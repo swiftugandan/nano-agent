@@ -193,3 +193,74 @@ fn substitute(template: &str, ctx: &PromptContext) -> String {
         .replace("{agent_id}", &ctx.agent_id)
         .replace("{session_id}", &ctx.session_id)
 }
+
+// ---------------------------------------------------------------------------
+// Prompt helpers (moved from main.rs)
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_prompt_context(
+    agent_name: &str,
+    agent_role: &str,
+    cwd: &Path,
+    tool_count: usize,
+    todo_state: String,
+    skill_desc: String,
+    model_name: &str,
+    agent_id: &str,
+    session_id: &str,
+    recalled_memories: String,
+) -> PromptContext {
+    PromptContext {
+        agent_name: agent_name.to_string(),
+        agent_role: agent_role.to_string(),
+        cwd: cwd.display().to_string(),
+        tool_count,
+        todo_state: if todo_state.is_empty() {
+            "(empty)".into()
+        } else {
+            todo_state
+        },
+        skill_descriptions: if skill_desc.is_empty() {
+            "(none loaded)".into()
+        } else {
+            skill_desc
+        },
+        timestamp: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        model_id: model_name.to_string(),
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        recalled_memories,
+    }
+}
+
+pub fn format_recalled_memories(entries: &[crate::memory_store::MemoryEntry]) -> String {
+    if entries.is_empty() {
+        String::new()
+    } else {
+        entries
+            .iter()
+            .map(|m| format!("- [{}] {}", m.timestamp, m.text))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+pub fn extract_last_response_text(messages: &[serde_json::Value]) -> Option<String> {
+    let last = messages.last()?;
+    let content = last.get("content")?;
+    if let Some(arr) = content.as_array() {
+        let texts: Vec<&str> = arr
+            .iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect();
+        if texts.is_empty() {
+            None
+        } else {
+            Some(texts.join(""))
+        }
+    } else {
+        content.as_str().map(|s| s.to_string())
+    }
+}
