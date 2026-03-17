@@ -1387,6 +1387,7 @@ fn scenario_22_overflow_triggers_compaction() {
         compact_signal: Some(&compact_signal),
         transcript_dir: None,
         idle_signal: None,
+        tool_callback: None,
     };
 
     let mut messages: Vec<serde_json::Value> =
@@ -1497,6 +1498,8 @@ fn scenario_24_prompt_assembly_with_skills_and_todos() {
         tool_count: 34,
         todo_state: "[ ] Design schema\n[>] Implement API\n[x] Set up CI".into(),
         skill_descriptions: "- testing: Run tests with cargo\n- deploy: Deploy safely".into(),
+        timestamp: "2026-03-17T00:00:00".into(),
+        ..Default::default()
     };
 
     let prompt = assembler.compose(&ctx);
@@ -1562,8 +1565,8 @@ fn scenario_25_prompt_hot_reload() {
         agent_role: "dev".into(),
         cwd: "/tmp".into(),
         tool_count: 10,
-        todo_state: String::new(),
-        skill_descriptions: String::new(),
+        timestamp: "2026-03-17T00:00:00".into(),
+        ..Default::default()
     };
 
     let prompt_v1 = assembler.compose(&ctx);
@@ -1821,6 +1824,8 @@ fn scenario_30_full_new_features_integration() {
         tool_count: 34,
         todo_state: "[>] Run integration test".into(),
         skill_descriptions: "- testing: cargo test".into(),
+        timestamp: "2026-03-17T00:00:00".into(),
+        ..Default::default()
     };
     let system = assembler.compose(&ctx);
     assert!(system.contains("integration-bot"));

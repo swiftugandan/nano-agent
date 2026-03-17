@@ -222,6 +222,65 @@ interface TranscriptStore:
         # Returns all transcript files
 ```
 
+### SessionStore
+
+JSONL-based session replay, enabling conversation resumption across restarts.
+
+```pseudocode
+interface SessionStore:
+    path: path
+    session_id: string
+
+    function append_turn(new_messages: list) -> void
+        # Appends each message as a JSON line with timestamp to session_{id}.jsonl
+
+    function rebuild() -> list
+        # Reads session file, reconstructs full message history in order
+
+    function list_sessions(session_dir: path) -> list<(id, path)>
+        # Static method: scans directory for session_*.jsonl files
+        # Returns list of (session_id, file_path) tuples
+```
+
+**Integration**: Enables the `/resume` command — lists available sessions and rebuilds message history from the selected one.
+
+Reference: `src/memory.rs` (SessionStore ~line 292)
+
+### MemoryStore
+
+TF-IDF semantic recall for persisting and retrieving context across conversations.
+
+```pseudocode
+interface MemoryStore:
+    static_path: path       # MEMORY.md
+    dynamic_dir: path       # per-day JSONL files
+
+    function save_memory(text: string, tags: list<string>) -> string
+        # Appends entry to {date}.jsonl with timestamp
+        # Returns confirmation string
+
+    function recall(query: string, top_k: int) -> list<MemoryEntry>
+        # TF-IDF scoring: tokenize → stop-word removal → term frequency → IDF
+        # Scores each entry (text + tags) against query
+        # Returns top_k entries sorted by score, excluding zero-score
+
+    function load_static() -> string
+        # Reads and returns MEMORY.md content
+```
+
+**MemoryEntry shape:**
+```pseudocode
+type MemoryEntry:
+    text: string
+    tags: list<string>
+    timestamp: string
+    score: float
+```
+
+**Integration**: `save_memory` tool (EP1), recalled memories injected via `PromptContext.recalled_memories` (EP4)
+
+Reference: `src/memory_store.rs`
+
 ---
 
 ## Layer 6: Tasks
@@ -465,6 +524,174 @@ interface EventBus:
 
 ---
 
+## Cross-Cutting: I/O Channels
+
+Channels sit below the core loop as I/O infrastructure — they abstract input sources and feed messages into the loop without extending it through the 5 extension points.
+
+### Channel Trait
+
+```pseudocode
+interface Channel:
+    function name() -> string
+    function recv() -> InboundMessage | null   # non-blocking
+    function send(peer_id: string, text: string) -> Result
+```
+
+### InboundMessage
+
+```pseudocode
+type InboundMessage:
+    text: string
+    sender_id: string
+    channel: string
+    peer_id: string
+    is_group: bool
+    media: list<MediaAttachment>
+    raw: json
+```
+
+### MediaAttachment
+
+```pseudocode
+type MediaAttachment:
+    kind: string        # "image", "file", "audio", etc.
+    url: string
+    name: string
+```
+
+### CliChannel
+
+```pseudocode
+interface CliChannel implements Channel:
+    # Wraps stdin/stdout via background thread + mpsc
+    # recv() returns non-blocking try_recv from mpsc receiver
+    # send() prints to stdout
+    # name() returns "cli"
+```
+
+### ChannelManager
+
+```pseudocode
+interface ChannelManager:
+    channels: list<Channel>
+
+    function add(channel: Channel) -> void
+    function poll() -> InboundMessage | null
+        # Round-robin over channels, returns first available message
+    function send(channel_name: string, peer_id: string, text: string) -> Result
+        # Routes to the named channel
+    function channel_names() -> list<string>
+```
+
+### WebSocketChannel
+
+```pseudocode
+interface WebSocketChannel implements Channel:
+    incoming: VecDeque<InboundMessage>      # thread-safe queue
+    connections: map<string, TcpStream>     # peer_id → stream
+
+    # name() returns "websocket"
+    # recv() pops from incoming queue
+    # send() writes WebSocket text frame to peer's stream
+```
+
+### Gateway
+
+```pseudocode
+interface Gateway:
+    addr: string
+    ws_channel: WebSocketChannel
+    bindings: map<(channel, peer_id), agent_name>  # routing table
+
+    function bind(channel: string, peer_id: string, agent: string) -> void
+        # Register a (channel, peer_id) → agent_name binding
+
+    function resolve(channel: string, peer_id: string) -> string | null
+        # Look up which agent handles a (channel, peer_id)
+
+    function start() -> void
+        # Spawn background thread: TCP listener with RFC 6455 WebSocket handshake
+        # Each connection spawns a reader thread pushing to ws_channel.incoming
+
+    function ws_channel() -> WebSocketChannel
+        # Returns reference to the WebSocket channel for ChannelManager registration
+```
+
+Reference: `src/channels.rs`, `src/gateway.rs`
+
+---
+
+## Cross-Cutting: Reliable Delivery
+
+Guarantees outbound message delivery via a file-based write-ahead queue with retry and dead-lettering.
+
+### DeliveryItem
+
+```pseudocode
+type DeliveryItem:
+    id: string
+    channel: string
+    peer_id: string
+    payload: string
+    attempts: int
+    max_attempts: int
+    next_attempt_epoch: int     # unix timestamp
+```
+
+### DeliveryQueue
+
+```pseudocode
+interface DeliveryQueue:
+    queue_dir: path
+    dead_letter_dir: path
+
+    function enqueue(item: DeliveryItem) -> Result
+        # Atomic file write: temp → fsync → rename
+
+    function load_pending() -> list<DeliveryItem>
+        # Reads all .json files from queue_dir
+
+    function remove(id: string) -> void
+        # Deletes the item file on successful delivery
+
+    function dead_letter(item: DeliveryItem) -> void
+        # Moves item from queue_dir to dead_letter_dir
+
+    function update(item: DeliveryItem) -> Result
+        # Re-writes item (e.g., after incrementing attempts); delegates to enqueue
+```
+
+### DeliveryRunner
+
+```pseudocode
+interface DeliveryRunner:
+    queue: DeliveryQueue
+    channel_manager: ChannelManager
+    poll_interval_ms: int       # default: 2000
+    base_delay_ms: int          # default: 1000
+    max_delay_ms: int           # default: 60000
+
+    function start() -> void
+        # Spawns background thread polling every poll_interval_ms
+        # For each pending item past its next_attempt_epoch:
+        #   - Attempt delivery via channel_manager.send()
+        #   - On success: remove from queue
+        #   - On failure: increment attempts, apply exponential backoff (base * 2^(attempts-1), capped at max_delay_ms)
+        #   - On max_attempts exceeded: dead-letter the item
+```
+
+### enqueue_delivery (convenience)
+
+```pseudocode
+function enqueue_delivery(queue, channel, peer_id, payload, max_attempts) -> string
+    # Creates a DeliveryItem with UUID, attempts=0, next_attempt_epoch=0
+    # Enqueues and returns the item ID
+```
+
+Reference: `src/delivery.rs`
+
+---
+
 ## Cross-Cutting: Resilience Layer
 
 ### ResilientLlm
@@ -497,6 +724,28 @@ enum LlmError:
 
 Maps HTTP status codes and response body keywords to error variants.
 
+### ContextGuard
+
+3-stage overflow recovery decorator. Wrapping order: `AnthropicLlm/OpenAiLlm → ResilientLlm → ContextGuard`
+
+```pseudocode
+interface ContextGuard implements Llm:
+    inner: Llm
+    transcript_dir: path
+
+    function create(params: LlmParams) -> Result<LlmResponse, LlmError>
+        # Stage 1: Normal call → on success or non-Overflow error, return
+        # Stage 2: Truncate tool_result content > 2000 chars → retry
+        # Stage 3: LLM-summarize first half of history (~50% reduction) → retry
+        # Stage 4: Propagate error
+```
+
+Helper functions (in `memory` module):
+- `truncate_tool_results(messages, max_len) -> bool` — replaces oversized tool_result content with truncated version
+- `compact_for_overflow(messages, llm, transcript_dir) -> list` — LLM-summarizes the conversation for context reduction
+
+Reference: `src/resilience.rs` (ContextGuard ~line 226), `src/memory.rs` (`compact_for_overflow`, `truncate_tool_results`)
+
 ---
 
 ## Cross-Cutting: Prompt Assembly
@@ -508,19 +757,42 @@ interface PromptAssembler:
     prompts_dir: path   # .nano-agent/prompts/
 
     function init_defaults() -> void
-        # Creates starter prompt files (SOUL.md, IDENTITY.md, TOOLS.md, GUIDELINES.md)
+        # Creates starter prompt files for all layers (REQUIRED + OPTIONAL)
         # Does NOT overwrite existing files
 
     function compose(ctx: PromptContext) -> string
-        # Loads layer files in order: SOUL.md, IDENTITY.md, TOOLS.md, GUIDELINES.md, MEMORY.md
-        # Substitutes placeholders: {name}, {role}, {cwd}, {tool_count}
+        # Loads layer files in two tiers:
+        #   REQUIRED: SOUL.md, IDENTITY.md, TOOLS.md, GUIDELINES.md, MEMORY.md
+        #   OPTIONAL: HEARTBEAT.md, BOOTSTRAP.md, AGENTS.md, USER.md
+        # Substitutes placeholders: {name}, {role}, {cwd}, {tool_count},
+        #   {timestamp}, {model_id}, {agent_id}, {session_id}
         # Injects dynamic sections (todo state, skills) after TOOLS.md
-        # Missing files are skipped (not defaulted)
+        # Appends recalled_memories after all layer files
+        # Missing/empty files are silently skipped
         # Falls back to minimal prompt if no files found
 
     function reload() -> void
         # Re-reads files from disk (for hot-reload of prompt edits)
 ```
+
+### PromptContext
+
+```pseudocode
+type PromptContext:
+    agent_name: string
+    agent_role: string
+    cwd: string
+    tool_count: int
+    todo_state: string
+    skill_descriptions: string
+    timestamp: string
+    model_id: string
+    agent_id: string
+    session_id: string
+    recalled_memories: string
+```
+
+Reference: `src/prompt.rs`
 
 ---
 
@@ -608,9 +880,11 @@ L10 Autonomy          → L6, L8, L9
 L11 Isolation         → L6, L10
 
 Cross-cutting:
-    Resilience        wraps any Llm implementation
+    Resilience        wraps any Llm implementation (ResilientLlm + ContextGuard)
     Prompt Assembly   composes system prompt from .nano-agent/prompts/
     Heartbeat         injects cron events via Pre-LLM Injection (EP2)
+    I/O Channels      abstracts input sources (CLI, WebSocket); feeds core loop
+    Reliable Delivery guarantees outbound message delivery via write-ahead queue
 ```
 
 Each layer ONLY extends the core loop through the 5 extension points — it never modifies the loop itself.

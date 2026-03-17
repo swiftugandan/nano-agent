@@ -1,6 +1,7 @@
 use crate::types::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 /// Run the core agent loop pattern with an LLM.
 /// Returns the number of LLM calls made.
@@ -73,7 +74,43 @@ pub fn run_agent_loop(
         let mut results: Vec<serde_json::Value> = Vec::new();
         for block in &response.content {
             if let ContentBlock::ToolUse { id, name, input } = block {
-                let output = route(dispatch, name, input.clone());
+                // Emit Start event
+                if let Some(cb) = signals.tool_callback {
+                    cb(ToolEvent::Start {
+                        name: name.clone(),
+                        input: input.clone(),
+                    });
+                }
+
+                let start = Instant::now();
+                let result = route(dispatch, name, input.clone());
+                let duration = start.elapsed();
+
+                let output = match &result {
+                    Ok(out) => out.clone(),
+                    Err(err) => err.clone(),
+                };
+
+                // Emit Complete or Error event
+                if let Some(cb) = signals.tool_callback {
+                    match &result {
+                        Err(err) => {
+                            cb(ToolEvent::Error {
+                                name: name.clone(),
+                                error: err.clone(),
+                                duration,
+                            });
+                        }
+                        Ok(out) => {
+                            cb(ToolEvent::Complete {
+                                name: name.clone(),
+                                summary: summarize_tool_output(out),
+                                duration,
+                            });
+                        }
+                    }
+                }
+
                 results.push(serde_json::json!({
                     "type": "tool_result",
                     "tool_use_id": id,
@@ -106,11 +143,36 @@ pub fn run_agent_loop(
 }
 
 /// Route a tool call to the correct handler. Never panics.
-/// Returns "Unknown tool: {name}" for missing handlers.
-pub fn route(dispatch: &Dispatch, tool_name: &str, input: serde_json::Value) -> String {
+/// Returns `Ok(output)` on success, `Err(message)` for unknown tools or
+/// handlers that return an error string (prefixed with `"Error: "`).
+pub fn route(
+    dispatch: &Dispatch,
+    tool_name: &str,
+    input: serde_json::Value,
+) -> Result<String, String> {
     match dispatch.get(tool_name) {
-        Some(handler) => handler(input),
-        None => format!("Unknown tool: {}", tool_name),
+        Some(handler) => {
+            let output = handler(input);
+            if output.starts_with("Error: ") {
+                Err(output)
+            } else {
+                Ok(output)
+            }
+        }
+        None => Err(format!("Unknown tool: {}", tool_name)),
+    }
+}
+
+/// Summarize tool output for display (line count or truncated text).
+fn summarize_tool_output(output: &str) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    if lines.len() > 3 {
+        format!("{} lines", lines.len())
+    } else if output.chars().count() > 80 {
+        let truncated: String = output.chars().take(77).collect();
+        format!("{}...", truncated)
+    } else {
+        output.to_string()
     }
 }
 

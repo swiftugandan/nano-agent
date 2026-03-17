@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 // Prompt context passed to the assembler
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
 pub struct PromptContext {
     pub agent_name: String,
     pub agent_role: String,
@@ -12,6 +13,13 @@ pub struct PromptContext {
     pub tool_count: usize,
     pub todo_state: String,
     pub skill_descriptions: String,
+    // GAP 4: Runtime context injection
+    pub timestamp: String,
+    pub model_id: String,
+    pub agent_id: String,
+    pub session_id: String,
+    // GAP 3/5: Recalled memories from TF-IDF search
+    pub recalled_memories: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -22,6 +30,17 @@ pub struct PromptAssembler {
     prompts_dir: PathBuf,
     layers: Vec<(String, String)>, // (filename, content)
 }
+
+// GAP 5: Required vs optional layer definitions
+const REQUIRED_LAYERS: &[&str] = &[
+    "SOUL.md",
+    "IDENTITY.md",
+    "TOOLS.md",
+    "GUIDELINES.md",
+    "MEMORY.md",
+];
+
+const OPTIONAL_LAYERS: &[&str] = &["HEARTBEAT.md", "BOOTSTRAP.md", "AGENTS.md", "USER.md"];
 
 impl PromptAssembler {
     pub fn new(prompts_dir: &Path) -> Self {
@@ -34,16 +53,10 @@ impl PromptAssembler {
     }
 
     /// Load all layer files from the prompts directory.
+    /// Required layers are loaded first, then optional layers (silently skipped if absent).
     fn load(&mut self) {
         self.layers.clear();
-        let layer_files = [
-            "SOUL.md",
-            "IDENTITY.md",
-            "TOOLS.md",
-            "GUIDELINES.md",
-            "MEMORY.md",
-        ];
-        for filename in &layer_files {
+        for filename in REQUIRED_LAYERS.iter().chain(OPTIONAL_LAYERS.iter()) {
             let path = self.prompts_dir.join(filename);
             if let Ok(content) = fs::read_to_string(&path) {
                 if !content.trim().is_empty() {
@@ -67,7 +80,11 @@ impl PromptAssembler {
                 "IDENTITY.md",
                 "## Identity\n\
                  - Agent: {name}\n\
-                 - Role: {role}\n",
+                 - Role: {role}\n\
+                 - Model: {model_id}\n\
+                 - Agent ID: {agent_id}\n\
+                 - Session: {session_id}\n\
+                 - Timestamp: {timestamp}\n",
             ),
             (
                 "TOOLS.md",
@@ -84,7 +101,31 @@ impl PromptAssembler {
                  - Use subagent to delegate isolated subtasks.\n\
                  - Use worktree_create to work in isolated git branches per task.\n\
                  - Communicate with teammates via send_message/broadcast_message.\n\
-                 - Use scan_tasks and claim_task to pick up unclaimed work.\n",
+                 - Use scan_tasks and claim_task to pick up unclaimed work.\n\
+                 - Use save_memory to persist important context for future recall.\n",
+            ),
+            (
+                "HEARTBEAT.md",
+                "## Heartbeat\n\
+                 Cron jobs can be scheduled with cron_add to inject prompts on a schedule.\n\
+                 Use cron_list to see active schedules.\n",
+            ),
+            (
+                "BOOTSTRAP.md",
+                "## Bootstrap\n\
+                 On startup, review your todo list and any pending tasks.\n\
+                 Check your inbox for messages from teammates.\n",
+            ),
+            (
+                "AGENTS.md",
+                "## Multi-Agent\n\
+                 You can spawn teammates with spawn_teammate for parallel work.\n\
+                 Teammates communicate via the message bus.\n",
+            ),
+            (
+                "USER.md",
+                "## User Context\n\
+                 Adapt your responses to the user's expertise and preferences.\n",
             ),
         ];
 
@@ -117,6 +158,11 @@ impl PromptAssembler {
             }
         }
 
+        // GAP 5: Inject recalled memories if present
+        if !ctx.recalled_memories.is_empty() {
+            parts.push(format!("## Recalled Memories\n{}", ctx.recalled_memories));
+        }
+
         // If no files were loaded, fall back to a minimal prompt
         if parts.is_empty() {
             return format!(
@@ -142,4 +188,8 @@ fn substitute(template: &str, ctx: &PromptContext) -> String {
         .replace("{role}", &ctx.agent_role)
         .replace("{cwd}", &ctx.cwd)
         .replace("{tool_count}", &ctx.tool_count.to_string())
+        .replace("{timestamp}", &ctx.timestamp)
+        .replace("{model_id}", &ctx.model_id)
+        .replace("{agent_id}", &ctx.agent_id)
+        .replace("{session_id}", &ctx.session_id)
 }

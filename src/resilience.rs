@@ -1,5 +1,6 @@
 use crate::types::*;
 use std::env;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Error classification
@@ -54,17 +55,6 @@ impl RetryPolicy {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1000),
-            max_delay_ms: 30_000,
-            jitter_factor: 0.25,
-        }
-    }
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        Self {
-            max_attempts: 3,
-            base_delay_ms: 1000,
             max_delay_ms: 30_000,
             jitter_factor: 0.25,
         }
@@ -227,5 +217,74 @@ impl Llm for ResilientLlm {
         Err(last_error.unwrap_or(LlmError::Fatal {
             message: "Max retry attempts exceeded".to_string(),
         }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GAP 1: ContextGuard — 3-stage overflow recovery decorator
+// ---------------------------------------------------------------------------
+//
+// Wrapping order: AnthropicLlm → ResilientLlm → ContextGuard
+//
+// Stage 1: Normal call → on success or non-Overflow, return
+// Stage 2: On Overflow → truncate oversized tool results (>2000 chars) → retry
+// Stage 3: Still Overflow → LLM-summarize history (50% reduction) → retry
+// Stage 4: Still Overflow → propagate error
+
+pub struct ContextGuard {
+    inner: Box<dyn Llm>,
+    transcript_dir: PathBuf,
+}
+
+impl ContextGuard {
+    pub fn new(inner: Box<dyn Llm>, transcript_dir: &Path) -> Self {
+        Self {
+            inner,
+            transcript_dir: transcript_dir.to_path_buf(),
+        }
+    }
+}
+
+impl Llm for ContextGuard {
+    fn create(&mut self, params: LlmParams) -> Result<LlmResponse, LlmError> {
+        // Stage 1: Normal call
+        match self.inner.create(params.clone()) {
+            Ok(resp) => return Ok(resp),
+            Err(LlmError::Overflow { message }) => {
+                eprintln!(
+                    "[context-guard] Overflow (stage 1), truncating tool results: {}",
+                    &message[..message.len().min(100)]
+                );
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Stage 2: Truncate oversized tool results and retry
+        let mut params2 = params;
+        let truncated = crate::memory::truncate_tool_results(&mut params2.messages, 2000);
+        if truncated {
+            match self.inner.create(params2.clone()) {
+                Ok(resp) => return Ok(resp),
+                Err(LlmError::Overflow { message }) => {
+                    eprintln!(
+                        "[context-guard] Overflow (stage 2), compacting history: {}",
+                        &message[..message.len().min(100)]
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Stage 3: LLM-summarize history for ~50% reduction
+        let compacted = crate::memory::compact_for_overflow(
+            &params2.messages,
+            self.inner.as_mut(),
+            &self.transcript_dir,
+        );
+        let mut params3 = params2;
+        params3.messages = compacted;
+
+        // Final retry — propagate whatever happens
+        self.inner.create(params3)
     }
 }

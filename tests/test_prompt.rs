@@ -3,12 +3,14 @@ use tempfile::TempDir;
 
 fn make_context() -> PromptContext {
     PromptContext {
-        agent_name: "TestBot".to_string(),
-        agent_role: "developer".to_string(),
-        cwd: "/tmp/project".to_string(),
+        agent_name: "TestBot".into(),
+        agent_role: "developer".into(),
+        cwd: "/tmp/project".into(),
         tool_count: 25,
-        todo_state: "[ ] Fix bug".to_string(),
-        skill_descriptions: "deploy: Deploy to production".to_string(),
+        todo_state: "[ ] Fix bug".into(),
+        skill_descriptions: "deploy: Deploy to production".into(),
+        timestamp: "2026-03-17T00:00:00".into(),
+        ..Default::default()
     }
 }
 

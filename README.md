@@ -10,22 +10,58 @@ A Rust-based autonomous coding agent that runs an interactive loop with an LLM, 
 - **Rust** (2021 edition)
 - **LLM API keys** (one of):
   - Anthropic: `ANTHROPIC_API_KEY` (default backend)
-  - OpenAI: `OPENAI_API_KEY` — set `LLM_BACKEND=openai` to use
+  - OpenRouter: `OPENROUTER_API_KEY` — set `LLM_BACKEND=openai` to use
 
-## Build & Run
+## Quick Start
 
 ```bash
+# 1. Build
 cargo build --release
+
+# 2. Set an API key (pick one)
+export ANTHROPIC_API_KEY="sk-ant-..."          # default backend
+# — or —
+export LLM_BACKEND=openai
+export OPENROUTER_API_KEY="sk-or-..."
+export OPENROUTER_MODEL="openai/gpt-4o-mini"   # any OpenRouter model
+
+# 3. Run
 ./target/release/agent
 ```
 
-Or from the project root:
+### Usage
+
+**Interactive (REPL)** — launch with no arguments:
 
 ```bash
-cargo run --bin agent
+agent
 ```
 
-The agent starts an interactive prompt (`> `). Type your request and press Enter; the agent uses the configured LLM and tools to respond. Transcripts are saved under `.nano-agent/transcripts` on exit or `/clear`.
+The REPL provides readline-style editing (arrow keys, Ctrl-A/E/K), persistent history (up arrow recalls previous inputs across sessions), and tab-completion for slash commands (type `/` then Tab).
+
+- **Ctrl-C** — cancel current input, show new prompt
+- **Ctrl-D** — clean exit (same as `/quit`)
+
+**One-shot** — pass a prompt as an argument:
+
+```bash
+agent "explain src/main.rs in one paragraph"
+```
+
+Prints the response to stdout and exits. Useful for scripting and pipes:
+
+```bash
+cat error.log | agent "what went wrong?"
+agent "list TODOs in src/" > todos.txt
+```
+
+**Resume a session:**
+
+```bash
+agent --resume <session-id>
+```
+
+Transcripts and history are stored under `.nano-agent/` in the current working directory.
 
 ## Environment
 
@@ -35,6 +71,13 @@ The agent starts an interactive prompt (`> `). Type your request and press Enter
 | `AGENT_NAME`   | `lead`       | Agent identity name                  |
 | `AGENT_ROLE`   | `developer`  | Agent role in system prompt          |
 | `SKILLS_DIR`   | `.nano-agent/skills` | Directory for skill files (see `read_skill`) |
+| `OPENROUTER_API_KEY` | —     | API key for OpenRouter backend       |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter API base URL |
+| `OPENROUTER_MODEL` | `openai/gpt-4o-mini` | Model to use via OpenRouter |
+| `ANTHROPIC_API_KEY_2..10` | — | Additional API keys for rotation on auth errors |
+| `RETRY_MAX_ATTEMPTS` | `3`   | Max retry attempts for transient LLM errors |
+| `RETRY_BASE_DELAY_MS` | `1000` | Base delay (ms) for exponential backoff |
+| `RESUME_SESSION` | —         | Session ID to resume on startup      |
 
 Data is stored under **`.nano-agent/`** in the current working directory: `tasks`, `transcripts`, `inbox`, `team`, `events.jsonl`, and `skills`.
 
@@ -48,6 +91,7 @@ In the REPL you can use:
 - **`/tasks`** — List all tasks (task manager)
 - **`/team`** — List teammates
 - **`/events`** — Show recent event-bus entries
+- **`/resume`** — List available sessions for resumption
 
 ## Capabilities (tools)
 
@@ -62,18 +106,46 @@ The agent has many tools, including:
 - **Isolation** — `worktree_create` (git worktree per task)
 - **Knowledge** — `read_skill` (load skills from `SKILLS_DIR`)
 - **Events** — `emit_event`, `list_events`
+- **Memory** — `save_memory` (persist context for TF-IDF recall)
+- **Lifecycle** — `idle` (transition to idle), `compact` (manual compaction)
+- **Cron** — `cron_add`, `cron_list`, `cron_remove`
+- **Team** — `spawn_teammate`, `shutdown_teammate`
+- **Delivery** — `enqueue_delivery` (reliable message delivery with retry)
 
 The system prompt instructs the agent to keep one todo in progress, use tasks for multi-step work, use background runs for long commands, and coordinate via the message bus and task claiming.
 
-## Tests
+## Development
+
+### Building
 
 ```bash
-cargo test
+cargo build              # debug build
+cargo build --release    # optimized build
 ```
 
-Integration tests cover the core loop, planning, delegation, knowledge, memory, tasks, concurrency, teams, protocols, autonomy, isolation, and LLM backends (with mocks where needed).
+### Running Tests
 
-## Project layout
+```bash
+cargo test               # run all tests
+cargo test test_l1       # run a specific test suite (e.g. core loop)
+cargo test scenario_19   # run a single scenario
+```
+
+### Adding a Tool
+
+1. Define the tool schema in `src/tools.rs` (`tool_definitions()`)
+2. Add a handler closure in `src/main.rs` (`build_dispatch()`)
+3. Add tests in the appropriate `tests/` file
+
+### Adding a Slash Command
+
+Slash commands are handled in the REPL loop in `src/main.rs`. To add tab-completion for a new command, add it to the `SlashCompleter` command list in `src/channels.rs`.
+
+### Architecture
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full 11-layer design. The core invariant is a simple loop: call the LLM, append its response, execute any tool calls, append results, repeat until the LLM stops.
+
+## Project Layout
 
 - **`src/main.rs`** — Binary: REPL, tool wiring, system prompt, pre-turn pipeline (memory, nag, background, inbox).
 - **`src/lib.rs`** — Library root; modules:
@@ -82,13 +154,18 @@ Integration tests cover the core loop, planning, delegation, knowledge, memory, 
   - **Tools** — `tools` (definitions + dispatch), `delegation` (subagent)
   - **Planning** — `planning` (todo, nag policy)
   - **Tasks** — `tasks` (TaskManager, dependency graph)
-  - **Memory** — `memory` (compaction, transcript store)
+  - **Memory** — `memory` (compaction, transcript store, session replay), `memory_store` (TF-IDF semantic recall)
   - **Concurrency** — `concurrency` (background runner)
   - **Teams** — `teams` (message bus, teammates)
   - **Protocols** — `protocols` (e.g. request tracking)
   - **Autonomy** — `autonomy` (identity, task scan/claim)
   - **Isolation** — `isolation` (event bus, worktree manager)
   - **Knowledge** — `knowledge` (skill loader)
+  - **Channels** — `channels` (Channel trait, CliChannel, ChannelManager), `gateway` (WebSocket server, routing)
+  - **Delivery** — `delivery` (write-ahead queue, background retry runner)
+  - **Resilience** — `resilience` (ResilientLlm, ContextGuard, retry policy)
+  - **Prompt** — `prompt` (PromptAssembler, layered composition)
+  - **Util** — `util` (shared helpers)
   - **Mock** — `mock` (test doubles for LLM)
 
 ## License

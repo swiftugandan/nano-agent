@@ -170,6 +170,27 @@ impl Default for CompactSignal {
 }
 
 // ---------------------------------------------------------------------------
+// ToolEvent: emitted during tool execution for UI feedback
+// ---------------------------------------------------------------------------
+
+pub enum ToolEvent {
+    Start {
+        name: String,
+        input: serde_json::Value,
+    },
+    Complete {
+        name: String,
+        summary: String,
+        duration: std::time::Duration,
+    },
+    Error {
+        name: String,
+        error: String,
+        duration: std::time::Duration,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // LoopSignals: bundles optional signals for run_agent_loop
 // ---------------------------------------------------------------------------
 
@@ -177,6 +198,7 @@ pub struct LoopSignals<'a> {
     pub compact_signal: Option<&'a CompactSignal>,
     pub transcript_dir: Option<&'a std::path::Path>,
     pub idle_signal: Option<&'a AtomicBool>,
+    pub tool_callback: Option<&'a dyn Fn(ToolEvent)>,
 }
 
 impl<'a> LoopSignals<'a> {
@@ -185,6 +207,7 @@ impl<'a> LoopSignals<'a> {
             compact_signal: None,
             transcript_dir: None,
             idle_signal: None,
+            tool_callback: None,
         }
     }
 }

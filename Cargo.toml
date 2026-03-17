@@ -14,6 +14,9 @@ regex = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 ureq = { version = "2", features = ["json"] }
+clap = { version = "4", features = ["derive"] }
+reedline = "0.37"
+nu-ansi-term = "0.50"
 
 [dev-dependencies]
 tempfile = "3"

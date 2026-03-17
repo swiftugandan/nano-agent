@@ -126,8 +126,14 @@ fn test_l1_03_dispatch_routes_to_correct_handler() {
         ("foo".to_string(), "foo_result".to_string()),
         ("bar".to_string(), "bar_result".to_string()),
     ]));
-    assert_eq!(route(&dispatch, "foo", serde_json::json!({})), "foo_result");
-    assert_eq!(route(&dispatch, "bar", serde_json::json!({})), "bar_result");
+    assert_eq!(
+        route(&dispatch, "foo", serde_json::json!({})),
+        Ok("foo_result".to_string())
+    );
+    assert_eq!(
+        route(&dispatch, "bar", serde_json::json!({})),
+        Ok("bar_result".to_string())
+    );
 }
 
 #[test]

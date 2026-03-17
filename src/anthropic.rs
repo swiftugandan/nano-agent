@@ -1,4 +1,5 @@
 use crate::types::*;
+use crate::util::require_env;
 use std::env;
 
 /// Anthropic API backend.
@@ -11,7 +12,7 @@ pub struct AnthropicLlm {
 impl AnthropicLlm {
     pub fn from_env() -> Self {
         Self {
-            api_key: env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY must be set"),
+            api_key: require_env("ANTHROPIC_API_KEY"),
             base_url: env::var("ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|_| "https://api.anthropic.com".to_string()),
             model: env::var("MODEL_ID").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string()),

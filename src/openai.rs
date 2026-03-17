@@ -1,4 +1,5 @@
 use crate::types::*;
+use crate::util::require_env;
 use serde::Deserialize;
 use std::env;
 
@@ -12,7 +13,7 @@ pub struct OpenAiLlm {
 impl OpenAiLlm {
     pub fn from_env() -> Self {
         Self {
-            api_key: env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY must be set"),
+            api_key: require_env("OPENROUTER_API_KEY"),
             base_url: env::var("OPENROUTER_BASE_URL")
                 .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string()),
             model: env::var("OPENROUTER_MODEL")
