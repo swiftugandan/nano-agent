@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // MessageBus: JSONL inbox per teammate
@@ -131,6 +134,7 @@ pub struct TeamConfig {
 pub struct TeammateManager {
     pub dir: PathBuf,
     pub config: TeamConfig,
+    idle_signals: HashMap<String, Arc<AtomicBool>>,
 }
 
 impl TeammateManager {
@@ -152,6 +156,7 @@ impl TeammateManager {
         Self {
             dir: team_dir.to_path_buf(),
             config,
+            idle_signals: HashMap::new(),
         }
     }
 
@@ -206,6 +211,20 @@ impl TeammateManager {
     pub fn is_shutdown_requested(&self, name: &str) -> bool {
         self.find_member(name)
             .is_some_and(|m| m.status == "shutdown")
+    }
+
+    pub fn register_idle_signal(&mut self, name: &str, signal: Arc<AtomicBool>) {
+        self.idle_signals.insert(name.to_string(), signal);
+    }
+
+    pub fn shutdown(&mut self, name: &str) -> String {
+        // Set status to shutdown
+        self.set_status(name, "shutdown");
+        // Wake the teammate if it's in idle/waiting loop
+        if let Some(sig) = self.idle_signals.get(name) {
+            sig.store(true, Ordering::Release);
+        }
+        format!("Shutting down '{}'", name)
     }
 
     fn save_config(&self) {

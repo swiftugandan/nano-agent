@@ -19,6 +19,13 @@ pub fn run_agent_loop(
 ) -> usize {
     let mut call_count = 0;
     loop {
+        // Check interrupt before LLM call
+        if let Some(sig) = signals.interrupt_signal {
+            if sig.load(Ordering::Acquire) {
+                break;
+            }
+        }
+
         let typed_messages: Vec<Message> = messages
             .iter()
             .filter_map(|m| serde_json::from_value(m.clone()).ok())
@@ -72,8 +79,22 @@ pub fn run_agent_loop(
 
         // Execute tools and collect results
         let mut results: Vec<serde_json::Value> = Vec::new();
+        let mut interrupted = false;
         for block in &response.content {
             if let ContentBlock::ToolUse { id, name, input } = block {
+                // Check interrupt before each tool execution
+                if let Some(sig) = signals.interrupt_signal {
+                    if sig.load(Ordering::Acquire) {
+                        results.push(serde_json::json!({
+                            "type": "tool_result",
+                            "tool_use_id": id,
+                            "content": "[Interrupted by user]",
+                        }));
+                        interrupted = true;
+                        continue;
+                    }
+                }
+
                 // Emit Start event
                 if let Some(cb) = signals.tool_callback {
                     cb(ToolEvent::Start {
@@ -122,6 +143,10 @@ pub fn run_agent_loop(
             "role": "user",
             "content": results,
         }));
+
+        if interrupted {
+            break;
+        }
 
         // Check compact signal: run auto_compact if requested
         if let (Some(signal), Some(dir)) = (signals.compact_signal, signals.transcript_dir) {

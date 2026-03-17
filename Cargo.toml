@@ -17,6 +17,7 @@ ureq = { version = "2", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
 reedline = "0.37"
 nu-ansi-term = "0.50"
+ctrlc = "3"
 
 [dev-dependencies]
 tempfile = "3"

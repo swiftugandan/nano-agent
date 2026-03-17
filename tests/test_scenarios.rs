@@ -1388,6 +1388,7 @@ fn scenario_22_overflow_triggers_compaction() {
         transcript_dir: None,
         idle_signal: None,
         tool_callback: None,
+        interrupt_signal: None,
     };
 
     let mut messages: Vec<serde_json::Value> =

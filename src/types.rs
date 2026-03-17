@@ -199,6 +199,7 @@ pub struct LoopSignals<'a> {
     pub transcript_dir: Option<&'a std::path::Path>,
     pub idle_signal: Option<&'a AtomicBool>,
     pub tool_callback: Option<&'a dyn Fn(ToolEvent)>,
+    pub interrupt_signal: Option<&'a AtomicBool>,
 }
 
 impl<'a> LoopSignals<'a> {
@@ -208,6 +209,7 @@ impl<'a> LoopSignals<'a> {
             transcript_dir: None,
             idle_signal: None,
             tool_callback: None,
+            interrupt_signal: None,
         }
     }
 }

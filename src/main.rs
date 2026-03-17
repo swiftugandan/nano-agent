@@ -1311,9 +1311,19 @@ fn main() {
         let _ = teammate_manager.lock().unwrap().list_all();
     }
 
-    // -- Signals for compact and idle
+    // -- Signals for compact, idle, and interrupt
     let compact_signal = Arc::new(CompactSignal::new());
     let idle_signal = Arc::new(AtomicBool::new(false));
+    let interrupt_signal = Arc::new(AtomicBool::new(false));
+
+    // Install Ctrl+C handler to set interrupt signal
+    {
+        let sig = Arc::clone(&interrupt_signal);
+        ctrlc::set_handler(move || {
+            sig.store(true, Ordering::Release);
+        })
+        .expect("Failed to install Ctrl+C handler");
+    }
 
     // -- Build tool definitions: base (4) + extended (24)
     let mut tool_defs = tools::tool_definitions();
@@ -1403,6 +1413,7 @@ fn main() {
             transcript_dir: Some(&transcript_dir),
             idle_signal: None,
             tool_callback: None,
+            interrupt_signal: Some(&interrupt_signal),
         };
         run_agent_loop(
             llm_box.as_mut(),
@@ -1666,11 +1677,15 @@ fn main() {
             }
         };
 
+        // Clear interrupt flag before each agent loop run
+        interrupt_signal.store(false, Ordering::Release);
+
         let signals = LoopSignals {
             compact_signal: Some(&compact_signal),
             transcript_dir: Some(&transcript_dir),
             idle_signal: None,
             tool_callback: Some(&tool_cb),
+            interrupt_signal: Some(&interrupt_signal),
         };
         let _calls = run_agent_loop(
             llm_box.as_mut(),
@@ -1683,6 +1698,12 @@ fn main() {
 
         // Stop spinner (Drop joins the thread)
         drop(spinner);
+
+        // Show interruption notice if user pressed Ctrl+C
+        if interrupt_signal.load(Ordering::Acquire) {
+            UiRenderer::show_warning("Interrupted.");
+            interrupt_signal.store(false, Ordering::Release);
+        }
 
         // -- GAP 2: Persist new messages to session
         if messages.len() > prev_message_count {
