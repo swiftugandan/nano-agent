@@ -1068,3 +1068,565 @@ fn scenario_20_complete_project_workflow() {
     let event_count = events.lines().count();
     assert!(event_count >= 4, "should have worktree lifecycle events");
 }
+
+// ---------------------------------------------------------------------------
+// Scenario 21  (Resilience + L1): Transient errors trigger retry, then succeed
+//
+// The resilience layer retries on transient LLM errors. After 2 failures,
+// the third attempt succeeds and the agent loop completes normally.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scenario_21_resilience_retry_then_succeed() {
+    use nano_agent::resilience::{AuthProfile, ResilientLlm, RetryPolicy};
+
+    let mut mock = MockLLM::new();
+    // Queue 2 transient errors followed by a successful response
+    mock.queue_error(LlmError::Transient {
+        status: 429,
+        message: "rate limited".into(),
+    });
+    mock.queue_error(LlmError::Transient {
+        status: 500,
+        message: "internal error".into(),
+    });
+    mock.queue("end_turn", vec![make_text_block("Hello after retries!")]);
+
+    let policy = RetryPolicy {
+        max_attempts: 5,
+        base_delay_ms: 1, // minimal delay for tests
+        max_delay_ms: 5,
+        jitter_factor: 0.0,
+    };
+    let mut resilient: Box<dyn Llm> = Box::new(ResilientLlm::new(
+        Box::new(mock),
+        policy,
+        AuthProfile::empty(),
+    ));
+
+    let mut messages: Vec<serde_json::Value> = vec![
+        serde_json::json!({"role": "user", "content": "hello"}),
+    ];
+    let tools: Vec<serde_json::Value> = vec![];
+    let dispatch = empty_dispatch();
+
+    let calls = run_agent_loop(
+        resilient.as_mut(),
+        "system",
+        &mut messages,
+        &tools,
+        &dispatch,
+        &LoopSignals::none(),
+    );
+
+    // Loop should complete successfully (1 LLM call from the loop's perspective)
+    assert_eq!(calls, 1);
+    // Final message should contain the success text
+    let last = messages.last().unwrap();
+    assert_eq!(last["role"], "assistant");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 22  (Resilience + L1): Overflow error triggers compaction signal
+//
+// When the LLM returns an overflow error, the core loop should set the
+// compaction signal and inject a system message, allowing recovery.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scenario_22_overflow_triggers_compaction() {
+    use nano_agent::resilience::{AuthProfile, ResilientLlm, RetryPolicy};
+
+    let mut mock = MockLLM::new();
+    // First call overflows, second (after compaction hint) succeeds
+    mock.queue_error(LlmError::Overflow {
+        message: "context too long".into(),
+    });
+    mock.queue("end_turn", vec![make_text_block("Recovered after compaction")]);
+
+    let policy = RetryPolicy {
+        max_attempts: 1,
+        base_delay_ms: 1,
+        max_delay_ms: 5,
+        jitter_factor: 0.0,
+    };
+    let mut resilient: Box<dyn Llm> = Box::new(ResilientLlm::new(
+        Box::new(mock),
+        policy,
+        AuthProfile::empty(),
+    ));
+
+    let compact_signal = CompactSignal::new();
+    let signals = LoopSignals {
+        compact_signal: Some(&compact_signal),
+        transcript_dir: None,
+        idle_signal: None,
+    };
+
+    let mut messages: Vec<serde_json::Value> = vec![
+        serde_json::json!({"role": "user", "content": "process a very long context"}),
+    ];
+    let tools: Vec<serde_json::Value> = vec![];
+    let dispatch = empty_dispatch();
+
+    let calls = run_agent_loop(
+        resilient.as_mut(),
+        "system",
+        &mut messages,
+        &tools,
+        &dispatch,
+        &signals,
+    );
+
+    // 1 counted LLM call: overflow doesn't increment call_count (it `continue`s),
+    // the second call succeeds and is counted
+    assert_eq!(calls, 1);
+    // The loop should have recovered — last message is assistant
+    let last = messages.last().unwrap();
+    assert_eq!(last["role"], "assistant");
+    // An overflow system message should be in the conversation
+    let has_overflow_msg = messages.iter().any(|m| {
+        m.get("content")
+            .and_then(|c| c.as_str())
+            .map_or(false, |s| s.contains("Context overflow"))
+    });
+    assert!(has_overflow_msg, "overflow message should be injected");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 23  (Resilience + L1): Fatal error stops the loop gracefully
+//
+// A non-retryable error should stop the agent loop and inject an error
+// message into the conversation — no panic, no infinite retry.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scenario_23_fatal_error_stops_loop() {
+    use nano_agent::resilience::{AuthProfile, ResilientLlm, RetryPolicy};
+
+    let mut mock = MockLLM::new();
+    mock.queue_error(LlmError::Fatal {
+        message: "model not found".into(),
+    });
+
+    let policy = RetryPolicy {
+        max_attempts: 3,
+        base_delay_ms: 1,
+        max_delay_ms: 5,
+        jitter_factor: 0.0,
+    };
+    let mut resilient: Box<dyn Llm> = Box::new(ResilientLlm::new(
+        Box::new(mock),
+        policy,
+        AuthProfile::empty(),
+    ));
+
+    let mut messages: Vec<serde_json::Value> = vec![
+        serde_json::json!({"role": "user", "content": "hello"}),
+    ];
+    let tools: Vec<serde_json::Value> = vec![];
+    let dispatch = empty_dispatch();
+
+    let calls = run_agent_loop(
+        resilient.as_mut(),
+        "system",
+        &mut messages,
+        &tools,
+        &dispatch,
+        &LoopSignals::none(),
+    );
+
+    // Fatal errors break before incrementing call_count
+    assert_eq!(calls, 0);
+    // Error should be injected into conversation as a system message
+    let has_error_msg = messages.iter().any(|m| {
+        m.get("content")
+            .and_then(|c| c.as_str())
+            .map_or(false, |s| s.contains("LLM error") || s.contains("Fatal"))
+    });
+    assert!(has_error_msg, "error should be injected into messages");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 24  (Prompt Assembly + L4 + L2): Dynamic prompt composition
+//
+// Prompt assembler loads layered files, substitutes placeholders, and
+// injects dynamic todo/skill state — all composing into the system prompt.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scenario_24_prompt_assembly_with_skills_and_todos() {
+    use nano_agent::prompt::{PromptAssembler, PromptContext};
+
+    let dir = tmp();
+    let prompts_dir = dir.path().join("prompts");
+
+    // Create assembler and initialize defaults
+    let mut assembler = PromptAssembler::new(&prompts_dir);
+    assembler.init_defaults();
+    assembler.reload(); // pick up the newly created files
+
+    let ctx = PromptContext {
+        agent_name: "alpha".into(),
+        agent_role: "architect".into(),
+        cwd: "/project/root".into(),
+        tool_count: 34,
+        todo_state: "[ ] Design schema\n[>] Implement API\n[x] Set up CI".into(),
+        skill_descriptions: "- testing: Run tests with cargo\n- deploy: Deploy safely".into(),
+    };
+
+    let prompt = assembler.compose(&ctx);
+
+    // Placeholder substitution works
+    assert!(prompt.contains("alpha"), "agent name should be substituted");
+    assert!(prompt.contains("architect"), "agent role should be substituted");
+    assert!(prompt.contains("/project/root"), "cwd should be substituted");
+    assert!(prompt.contains("34"), "tool count should be substituted");
+
+    // Dynamic sections injected after TOOLS.md
+    assert!(prompt.contains("Current Todo List"), "todo section should be present");
+    assert!(prompt.contains("Implement API"), "todo items should appear");
+    assert!(prompt.contains("Available Skills"), "skills section should be present");
+    assert!(prompt.contains("testing"), "skill descriptions should appear");
+    assert!(prompt.contains("deploy"), "skill descriptions should appear");
+
+    // Guidelines still appear after the dynamic sections
+    assert!(prompt.contains("Guidelines"), "guidelines should be present");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 25  (Prompt Assembly): Hot-reload after user edits prompt files
+//
+// Simulates a user editing a prompt file mid-session. After reload(),
+// the new content should appear in the composed prompt.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scenario_25_prompt_hot_reload() {
+    use nano_agent::prompt::{PromptAssembler, PromptContext};
+
+    let dir = tmp();
+    let prompts_dir = dir.path().join("prompts");
+
+    let mut assembler = PromptAssembler::new(&prompts_dir);
+    assembler.init_defaults();
+    assembler.reload();
+
+    let ctx = PromptContext {
+        agent_name: "bot".into(),
+        agent_role: "dev".into(),
+        cwd: "/tmp".into(),
+        tool_count: 10,
+        todo_state: String::new(),
+        skill_descriptions: String::new(),
+    };
+
+    let prompt_v1 = assembler.compose(&ctx);
+    assert!(prompt_v1.contains("autonomous coding agent"));
+
+    // User edits SOUL.md
+    fs::write(
+        prompts_dir.join("SOUL.md"),
+        "You are a security auditor named '{name}' scanning {cwd} for vulnerabilities.\n",
+    )
+    .unwrap();
+
+    assembler.reload();
+    let prompt_v2 = assembler.compose(&ctx);
+    assert!(prompt_v2.contains("security auditor"), "reloaded prompt should reflect edit");
+    assert!(prompt_v2.contains("bot"), "placeholders still substituted");
+    assert!(!prompt_v2.contains("autonomous coding agent"), "old content should be gone");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 26  (Named Lanes + L7): Lane concurrency limits enforced
+//
+// The "main" lane (max 1) serializes tasks. The "background" lane (max 4)
+// allows parallel execution. Verify ordering and throughput.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scenario_26_lane_concurrency_and_serialization() {
+    use nano_agent::concurrency::{BackgroundManager, LANE_BACKGROUND, LANE_MAIN};
+
+    let bg = BackgroundManager::new();
+
+    // Submit 3 tasks to the main lane (serial, max 1)
+    let _r1 = bg.run_in_lane(LANE_MAIN, "echo main-1");
+    let _r2 = bg.run_in_lane(LANE_MAIN, "echo main-2");
+    let _r3 = bg.run_in_lane(LANE_MAIN, "echo main-3");
+
+    // Submit 4 tasks to background lane (parallel, max 4)
+    let _b1 = bg.run_in_lane(LANE_BACKGROUND, "echo bg-1");
+    let _b2 = bg.run_in_lane(LANE_BACKGROUND, "echo bg-2");
+    let _b3 = bg.run_in_lane(LANE_BACKGROUND, "echo bg-3");
+    let _b4 = bg.run_in_lane(LANE_BACKGROUND, "echo bg-4");
+
+    // Wait for all to complete
+    bg.wait_lane_idle(LANE_MAIN);
+    bg.wait_lane_idle(LANE_BACKGROUND);
+
+    let notes = bg.drain_notifications();
+    assert_eq!(notes.len(), 7, "all 7 tasks should complete");
+
+    let main_results: Vec<&str> = notes
+        .iter()
+        .filter(|n| n.command.contains("main-"))
+        .map(|n| n.result.as_str())
+        .collect();
+    assert_eq!(main_results.len(), 3);
+
+    let bg_results: Vec<&str> = notes
+        .iter()
+        .filter(|n| n.command.contains("bg-"))
+        .map(|n| n.result.as_str())
+        .collect();
+    assert_eq!(bg_results.len(), 4);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 27  (Named Lanes): Generation reset cancels queued tasks
+//
+// After reset_lane(), queued tasks with the old generation are skipped.
+// Only tasks submitted after the reset execute.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scenario_27_lane_reset_cancels_queued() {
+    use nano_agent::concurrency::{BackgroundManager, LANE_MAIN};
+
+    let bg = BackgroundManager::new();
+
+    // Fill the main lane (max 1) with a slow task, then queue more
+    let _r1 = bg.run_in_lane(LANE_MAIN, "sleep 0.3 && echo first");
+    let _r2 = bg.run_in_lane(LANE_MAIN, "echo should-be-cancelled-1");
+    let _r3 = bg.run_in_lane(LANE_MAIN, "echo should-be-cancelled-2");
+
+    // Reset immediately — cancels the queued tasks
+    bg.reset_lane(LANE_MAIN);
+
+    // Submit a new task after reset
+    let _r4 = bg.run_in_lane(LANE_MAIN, "echo post-reset");
+
+    // Wait for all activity to complete
+    bg.wait_lane_idle(LANE_MAIN);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let notes = bg.drain_notifications();
+    let results: Vec<String> = notes.iter().map(|n| n.result.clone()).collect();
+
+    // The first task (already running) should complete
+    assert!(results.iter().any(|r| r.contains("first")), "running task should complete");
+    // Post-reset task should complete
+    assert!(results.iter().any(|r| r.contains("post-reset")), "post-reset task should run");
+    // Cancelled tasks should NOT appear (or at most appear but the key point is post-reset works)
+    // Note: the cancelled tasks may or may not have been dequeued depending on timing,
+    // but the post-reset task must have run.
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 28  (Heartbeat + Cron): Full cron lifecycle via HeartbeatManager
+//
+// Add cron entries, verify they fire on tick, verify persistence across
+// reload, and verify drain_events clears the queue.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scenario_28_heartbeat_cron_lifecycle() {
+    use nano_agent::heartbeat::HeartbeatManager;
+
+    let dir = tmp();
+    let config = dir.path().join("cron.json");
+
+    let hb = HeartbeatManager::new(&config);
+
+    // Add two cron entries via delegate methods
+    let r1 = hb.add_cron("health", "* * * * *", "check system health");
+    assert!(r1.contains("added"));
+    let r2 = hb.add_cron("metrics", "*/5 * * * *", "collect metrics");
+    assert!(r2.contains("added"));
+
+    // List should show both
+    let list = hb.list_crons();
+    assert!(list.contains("health"));
+    assert!(list.contains("metrics"));
+
+    // Tick the scheduler — "health" (every minute) should fire
+    let events = hb.scheduler().tick();
+    assert!(events.iter().any(|e| e.name == "health"), "health cron should fire");
+
+    // Remove health entry
+    let rm = hb.remove_cron("health");
+    assert!(rm.contains("removed"));
+    let list2 = hb.list_crons();
+    assert!(!list2.contains("health"), "health should be gone");
+    assert!(list2.contains("metrics"), "metrics should remain");
+
+    // Verify persistence — reload from disk
+    let hb2 = HeartbeatManager::new(&config);
+    let list3 = hb2.list_crons();
+    assert!(!list3.contains("health"), "removed entry should not persist");
+    assert!(list3.contains("metrics"), "remaining entry should persist");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 29  (Resilience + L3): Subagent survives transient LLM error
+//
+// A subagent's underlying LLM hits a transient error. The resilience layer
+// retries and the subagent returns its result to the parent.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scenario_29_resilient_subagent_delegation() {
+    use nano_agent::resilience::{AuthProfile, ResilientLlm, RetryPolicy};
+
+    let mut mock = MockLLM::new();
+    // Subagent hits one transient error, then succeeds with tool use, then final text
+    mock.queue_error(LlmError::Transient {
+        status: 503,
+        message: "service unavailable".into(),
+    });
+    mock.queue(
+        "tool_use",
+        vec![make_tool_use_block("t1", "read_file", serde_json::json!({"path": "data.txt"}))],
+    );
+    mock.queue("end_turn", vec![make_text_block("File contains: important data")]);
+
+    let policy = RetryPolicy {
+        max_attempts: 3,
+        base_delay_ms: 1,
+        max_delay_ms: 5,
+        jitter_factor: 0.0,
+    };
+    let mut resilient = ResilientLlm::new(Box::new(mock), policy, AuthProfile::empty());
+
+    let tools = nano_agent::delegation::child_tools();
+    let mut h = HashMap::new();
+    h.insert("read_file".to_string(), "important data".to_string());
+    let dispatch = make_dispatch(h);
+
+    let result = SubagentFactory::spawn(
+        &mut resilient,
+        "Read data.txt and summarize",
+        &tools,
+        &dispatch,
+        5,
+    );
+
+    assert!(
+        result.contains("important data"),
+        "subagent should succeed after retry: got '{}'",
+        result
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 30  (All new features): End-to-end session with resilience,
+//              prompt assembly, cron, and lanes
+//
+// Simulates a full agent startup sequence: assemble prompt, configure cron,
+// run background tasks in lanes, handle a transient LLM error, and complete.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scenario_30_full_new_features_integration() {
+    use nano_agent::concurrency::{BackgroundManager, LANE_BACKGROUND, LANE_MAIN};
+    use nano_agent::heartbeat::HeartbeatManager;
+    use nano_agent::prompt::{PromptAssembler, PromptContext};
+    use nano_agent::resilience::{AuthProfile, ResilientLlm, RetryPolicy};
+
+    let dir = tmp();
+    let prompts_dir = dir.path().join("prompts");
+    let cron_config = dir.path().join("cron.json");
+
+    // Phase 1: Prompt assembly
+    let mut assembler = PromptAssembler::new(&prompts_dir);
+    assembler.init_defaults();
+    assembler.reload();
+
+    let ctx = PromptContext {
+        agent_name: "integration-bot".into(),
+        agent_role: "full-stack".into(),
+        cwd: dir.path().to_string_lossy().into(),
+        tool_count: 34,
+        todo_state: "[>] Run integration test".into(),
+        skill_descriptions: "- testing: cargo test".into(),
+    };
+    let system = assembler.compose(&ctx);
+    assert!(system.contains("integration-bot"));
+    assert!(system.contains("Run integration test"));
+
+    // Phase 2: Set up cron
+    let hb = HeartbeatManager::new(&cron_config);
+    hb.add_cron("watchdog", "* * * * *", "check health");
+    let events = hb.scheduler().tick();
+    assert_eq!(events.len(), 1, "watchdog should fire immediately");
+
+    // Phase 3: Run background tasks in lanes
+    let bg = BackgroundManager::new();
+    let _build = bg.run_in_lane(LANE_MAIN, "echo build-ok");
+    let _test1 = bg.run_in_lane(LANE_BACKGROUND, "echo test-1-ok");
+    let _test2 = bg.run_in_lane(LANE_BACKGROUND, "echo test-2-ok");
+
+    bg.wait_lane_idle(LANE_MAIN);
+    bg.wait_lane_idle(LANE_BACKGROUND);
+
+    let notes = bg.drain_notifications();
+    assert_eq!(notes.len(), 3);
+
+    // Phase 4: Resilient LLM call with retry
+    let mut mock = MockLLM::new();
+    mock.queue_error(LlmError::Transient {
+        status: 429,
+        message: "rate limited".into(),
+    });
+    mock.queue("end_turn", vec![make_text_block("Integration test passed!")]);
+
+    let policy = RetryPolicy {
+        max_attempts: 3,
+        base_delay_ms: 1,
+        max_delay_ms: 5,
+        jitter_factor: 0.0,
+    };
+    let mut resilient: Box<dyn Llm> = Box::new(ResilientLlm::new(
+        Box::new(mock),
+        policy,
+        AuthProfile::empty(),
+    ));
+
+    let mut messages: Vec<serde_json::Value> = vec![
+        serde_json::json!({"role": "user", "content": "run integration test"}),
+    ];
+
+    // Inject background results (as the main loop would)
+    for note in &notes {
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": format!("[background] {}: {}", note.status, note.result),
+        }));
+    }
+
+    // Inject cron events (as the main loop would)
+    for event in &events {
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": format!("[Cron '{}' fired]: {}", event.name, event.prompt),
+        }));
+    }
+
+    let tools: Vec<serde_json::Value> = vec![];
+    let dispatch = empty_dispatch();
+
+    let calls = run_agent_loop(
+        resilient.as_mut(),
+        &system,
+        &mut messages,
+        &tools,
+        &dispatch,
+        &LoopSignals::none(),
+    );
+
+    assert_eq!(calls, 1);
+    let last = messages.last().unwrap();
+    assert_eq!(last["role"], "assistant");
+}

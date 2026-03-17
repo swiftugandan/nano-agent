@@ -3,12 +3,15 @@ use nano_agent::autonomy;
 use nano_agent::concurrency::BackgroundManager;
 use nano_agent::core_loop::run_agent_loop;
 use nano_agent::delegation::{child_tools, SubagentFactory};
+use nano_agent::heartbeat::HeartbeatManager;
 use nano_agent::isolation::{EventBus, WorktreeManager};
 use nano_agent::knowledge::SkillLoader;
 use nano_agent::memory;
 use nano_agent::openai::OpenAiLlm;
 use nano_agent::planning::{NagPolicy, TodoItem, TodoManager};
+use nano_agent::prompt::{PromptAssembler, PromptContext};
 use nano_agent::protocols::RequestTracker;
+use nano_agent::resilience::{AuthProfile, ResilientLlm, RetryPolicy};
 use nano_agent::tasks::TaskManager;
 use nano_agent::teams::{MessageBus, TeammateManager};
 use nano_agent::tools;
@@ -122,7 +125,8 @@ fn extended_tool_definitions() -> Vec<serde_json::Value> {
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string" }
+                    "command": { "type": "string" },
+                    "lane": { "type": "string", "description": "Lane name (default: 'background'). Available: main, cron, background" }
                 },
                 "required": ["command"]
             }
@@ -279,6 +283,35 @@ fn extended_tool_definitions() -> Vec<serde_json::Value> {
             "description": "Transition from WORK to IDLE phase. Use when you have completed your current task and are waiting for new work. Only available to teammates, not the lead agent.",
             "input_schema": { "type": "object", "properties": {} }
         }),
+        serde_json::json!({
+            "name": "cron_add",
+            "description": "Add a scheduled cron job. The prompt will be injected as a user message when the cron fires.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name":   { "type": "string", "description": "Unique name for this cron entry" },
+                    "cron":   { "type": "string", "description": "Cron expression: minute hour day month weekday (e.g. '*/5 * * * *')" },
+                    "prompt": { "type": "string", "description": "Prompt to inject when cron fires" }
+                },
+                "required": ["name", "cron", "prompt"]
+            }
+        }),
+        serde_json::json!({
+            "name": "cron_remove",
+            "description": "Remove a scheduled cron job by name.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                },
+                "required": ["name"]
+            }
+        }),
+        serde_json::json!({
+            "name": "cron_list",
+            "description": "List all cron entries with their schedules and enabled status.",
+            "input_schema": { "type": "object", "properties": {} }
+        }),
     ]
 }
 
@@ -296,6 +329,7 @@ fn build_extended_dispatch(
     teammate_manager: Arc<Mutex<TeammateManager>>,
     request_tracker: Arc<RequestTracker>,
     event_bus: Arc<EventBus>,
+    heartbeat_manager: Arc<HeartbeatManager>,
     repo_root: PathBuf,
     tasks_dir: PathBuf,
     agent_name: String,
@@ -413,10 +447,12 @@ fn build_extended_dispatch(
     {
         let bg = Arc::clone(&bg);
         dispatch.insert("background_run".into(), Box::new(move |input| {
-            match input.get("command").and_then(|v| v.as_str()) {
-                Some(cmd) => bg.lock().unwrap().run(cmd),
-                None => "Error: missing 'command' field".into(),
-            }
+            let cmd = match input.get("command").and_then(|v| v.as_str()) {
+                Some(c) => c,
+                None => return "Error: missing 'command' field".into(),
+            };
+            let lane = input.get("lane").and_then(|v| v.as_str()).unwrap_or("background");
+            bg.lock().unwrap().run_in_lane(lane, cmd)
         }));
     }
 
@@ -500,6 +536,7 @@ fn build_extended_dispatch(
         let ev_bus = Arc::clone(&event_bus);
         let todo_mgr = Arc::clone(&todo);
         let nag_pol = Arc::clone(&nag);
+        let hb_mgr = Arc::clone(&heartbeat_manager);
         dispatch.insert("spawn_teammate".into(), Box::new(move |input| {
             let name = match input.get("name").and_then(|v| v.as_str()) {
                 Some(n) => n.to_string(),
@@ -534,12 +571,17 @@ fn build_extended_dispatch(
             let ev_bus_t = Arc::clone(&ev_bus);
             let todo_mgr_t = Arc::clone(&todo_mgr);
             let nag_pol_t = Arc::clone(&nag_pol);
+            let hb_mgr_t = Arc::clone(&hb_mgr);
             let name_t = name.clone();
             let role_t = role.clone();
             let prompt_t = prompt.clone();
 
             std::thread::spawn(move || {
-                let mut llm_box = create_llm(&backend_t);
+                let inner_llm = create_llm(&backend_t);
+                let policy = RetryPolicy::from_env();
+                let auth_prefix = if backend_t == "openai" { "OPENROUTER_API_KEY" } else { "ANTHROPIC_API_KEY" };
+                let auth = AuthProfile::from_env(auth_prefix);
+                let mut llm_box: Box<dyn Llm> = Box::new(ResilientLlm::new(inner_llm, policy, auth));
 
                 // Build tool defs + dispatch for the teammate
                 let mut tool_defs = tools::tool_definitions();
@@ -560,6 +602,7 @@ fn build_extended_dispatch(
                     Arc::clone(&tm_mgr_t),
                     req_tracker_t,
                     ev_bus_t,
+                    hb_mgr_t,
                     cwd_t,
                     tasks_d_t.clone(),
                     name_t.clone(),
@@ -746,6 +789,45 @@ fn build_extended_dispatch(
         }));
     }
 
+    // -- cron_add
+    {
+        let hb = Arc::clone(&heartbeat_manager);
+        dispatch.insert("cron_add".into(), Box::new(move |input| {
+            let name = match input.get("name").and_then(|v| v.as_str()) {
+                Some(n) => n,
+                None => return "Error: missing 'name'".into(),
+            };
+            let cron = match input.get("cron").and_then(|v| v.as_str()) {
+                Some(c) => c,
+                None => return "Error: missing 'cron'".into(),
+            };
+            let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => return "Error: missing 'prompt'".into(),
+            };
+            hb.add_cron(name, cron, prompt)
+        }));
+    }
+
+    // -- cron_remove
+    {
+        let hb = Arc::clone(&heartbeat_manager);
+        dispatch.insert("cron_remove".into(), Box::new(move |input| {
+            match input.get("name").and_then(|v| v.as_str()) {
+                Some(name) => hb.remove_cron(name),
+                None => "Error: missing 'name'".into(),
+            }
+        }));
+    }
+
+    // -- cron_list
+    {
+        let hb = Arc::clone(&heartbeat_manager);
+        dispatch.insert("cron_list".into(), Box::new(move |_| {
+            hb.list_crons()
+        }));
+    }
+
     dispatch
 }
 
@@ -759,17 +841,21 @@ fn main() {
     let data_dir = cwd.join(".nano-agent");
     std::fs::create_dir_all(&data_dir).ok();
 
-    // -- LLM backend
+    // -- LLM backend (wrapped in resilience layer)
     let (mut llm_box, model_name): (Box<dyn Llm>, String) = match backend.as_str() {
         "openai" => {
             let llm = OpenAiLlm::from_env();
             let model = llm.model.clone();
-            (Box::new(llm), model)
+            let policy = RetryPolicy::from_env();
+            let auth = AuthProfile::from_env("OPENROUTER_API_KEY");
+            (Box::new(ResilientLlm::new(Box::new(llm), policy, auth)), model)
         }
         _ => {
             let llm = AnthropicLlm::from_env();
             let model = llm.model.clone();
-            (Box::new(llm), model)
+            let policy = RetryPolicy::from_env();
+            let auth = AuthProfile::from_env("ANTHROPIC_API_KEY");
+            (Box::new(ResilientLlm::new(Box::new(llm), policy, auth)), model)
         }
     };
 
@@ -799,6 +885,15 @@ fn main() {
     let teammate_manager = Arc::new(Mutex::new(TeammateManager::new(&team_dir)));
     let request_tracker = Arc::new(RequestTracker::new());
 
+    // -- Heartbeat / cron scheduler
+    let cron_path = data_dir.join("cron.json");
+    let heartbeat_manager = Arc::new(HeartbeatManager::new(&cron_path));
+    heartbeat_manager.start();
+
+    // -- Prompt assembler
+    let mut prompt_assembler = PromptAssembler::new(&data_dir.join("prompts"));
+    prompt_assembler.init_defaults();
+
     // -- Register self as a teammate
     teammate_manager.lock().unwrap().spawn(&agent_name, &agent_role, "primary agent");
     // Pre-warm: list team (ensures config is written)
@@ -824,6 +919,7 @@ fn main() {
         Arc::clone(&teammate_manager),
         Arc::clone(&request_tracker),
         Arc::clone(&event_bus),
+        Arc::clone(&heartbeat_manager),
         cwd.to_path_buf(),
         tasks_dir.clone(),
         agent_name.clone(),
@@ -927,12 +1023,14 @@ fn main() {
             println!("[compact] Saved transcript: {}", path.display());
         }
 
+        // Render todo state once for both nag policy and prompt assembly
+        let todo_state = todo_manager.lock().unwrap().render();
+
         // L2: Nag policy
         {
             let mut nag = nag_policy.lock().unwrap();
             nag.tick();
             if nag.should_inject() {
-                let todo_state = todo_manager.lock().unwrap().render();
                 let nag_msg = format!(
                     "[System reminder: You haven't updated your todo list recently. Current state:\n{}]",
                     todo_state
@@ -961,31 +1059,28 @@ fn main() {
             }
         }
 
-        // -- Build dynamic system prompt
+        // -- Heartbeat: drain cron events
+        {
+            let events = heartbeat_manager.drain_events();
+            if !events.is_empty() {
+                let text = events.iter()
+                    .map(|e| format!("[Cron '{}' fired]: {}", e.name, e.prompt))
+                    .collect::<Vec<_>>().join("\n");
+                messages.push(serde_json::json!({"role": "user", "content": text}));
+            }
+        }
+
+        // -- Build dynamic system prompt via assembler
         let skill_desc = skill_loader.get_descriptions();
-        let todo_state = todo_manager.lock().unwrap().render();
-        let system = format!(
-            "You are an autonomous coding agent named '{name}' (role: {role}) working in {cwd}.\n\n\
-             ## Your Capabilities\n\
-             You have {n_tools} tools spanning file I/O, task management, planning, background \
-             execution, team communication, git worktree isolation, and subagent delegation.\n\n\
-             ## Current Todo List\n{todo}\n\n\
-             ## Available Skills\n{skills}\n\n\
-             ## Guidelines\n\
-             - Use todo_update to track your work. Keep exactly one item in_progress.\n\
-             - Use task_create/task_update for persistent multi-step work with dependencies.\n\
-             - Use background_run for long-running commands so you don't block.\n\
-             - Use subagent to delegate isolated subtasks.\n\
-             - Use worktree_create to work in isolated git branches per task.\n\
-             - Communicate with teammates via send_message/broadcast_message.\n\
-             - Use scan_tasks and claim_task to pick up unclaimed work.",
-            name = agent_name,
-            role = agent_role,
-            cwd = cwd.display(),
-            n_tools = tool_defs.len(),
-            todo = if todo_state.is_empty() { "(empty)".into() } else { todo_state },
-            skills = if skill_desc.is_empty() { "(none loaded)".into() } else { skill_desc },
-        );
+        prompt_assembler.reload();
+        let system = prompt_assembler.compose(&PromptContext {
+            agent_name: agent_name.clone(),
+            agent_role: agent_role.clone(),
+            cwd: cwd.display().to_string(),
+            tool_count: tool_defs.len(),
+            todo_state: if todo_state.is_empty() { "(empty)".into() } else { todo_state },
+            skill_descriptions: if skill_desc.is_empty() { "(none loaded)".into() } else { skill_desc },
+        });
 
         // -- Run the agent loop
         let signals = LoopSignals {

@@ -45,13 +45,18 @@ impl SubagentFactory {
                 .filter_map(|m| serde_json::from_value(m.clone()).ok())
                 .collect();
 
-            let response = llm.create(LlmParams {
+            let response = match llm.create(LlmParams {
                 model: "default".to_string(),
                 system: "You are a focused sub-agent. Complete the given task using the available tools.".to_string(),
                 messages: typed_messages,
                 tools: tools.to_vec(),
                 max_tokens: 16_000,
-            });
+            }) {
+                Ok(r) => r,
+                Err(e) => {
+                    return format!("(subagent error: {})", e);
+                }
+            };
 
             let content_json: Vec<serde_json::Value> = response
                 .content

@@ -23,13 +23,33 @@ pub fn run_agent_loop(
             .filter_map(|m| serde_json::from_value(m.clone()).ok())
             .collect();
 
-        let response = llm.create(LlmParams {
+        let response = match llm.create(LlmParams {
             model: "default".to_string(),
             system: system.to_string(),
             messages: typed_messages,
             tools: tools.to_vec(),
             max_tokens: 16_000,
-        });
+        }) {
+            Ok(r) => r,
+            Err(LlmError::Overflow { message }) => {
+                // Attempt compaction and continue
+                if let (Some(signal), Some(_dir)) = (signals.compact_signal, signals.transcript_dir) {
+                    signal.request();
+                }
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": format!("[System: Context overflow — {}. Compaction requested.]", message),
+                }));
+                continue;
+            }
+            Err(e) => {
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": format!("[System: LLM error — {}. Stopping.]", e),
+                }));
+                break;
+            }
+        };
         call_count += 1;
 
         // Serialize content blocks for the assistant message

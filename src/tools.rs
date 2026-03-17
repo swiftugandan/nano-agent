@@ -184,11 +184,7 @@ const MAX_OUTPUT_BYTES: usize = 50 * 1024; // 50KB
 
 fn truncate_output(s: String) -> String {
     if s.len() > MAX_OUTPUT_BYTES {
-        let mut end = MAX_OUTPUT_BYTES;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        let mut truncated = s[..end].to_string();
+        let mut truncated = crate::util::truncate_at_boundary(&s, MAX_OUTPUT_BYTES).to_string();
         truncated.push_str("\n... (output truncated)");
         truncated
     } else {

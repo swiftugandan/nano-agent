@@ -52,6 +52,7 @@ pub struct Message {
 // LLM abstraction
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct LlmParams {
     pub model: String,
     pub system: String,
@@ -60,13 +61,47 @@ pub struct LlmParams {
     pub max_tokens: usize,
 }
 
+#[derive(Debug)]
 pub struct LlmResponse {
     pub content: Vec<ContentBlock>,
     pub stop_reason: String,
 }
 
+// ---------------------------------------------------------------------------
+// LLM errors
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum LlmError {
+    /// Retryable: 429, 500, 502, 503
+    Transient { status: u16, message: String },
+    /// Context window exceeded
+    Overflow { message: String },
+    /// Authentication failure: 401, 403
+    Auth { status: u16, message: String },
+    /// Non-retryable
+    Fatal { message: String },
+}
+
+impl fmt::Display for LlmError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LlmError::Transient { status, message } => {
+                write!(f, "Transient error (HTTP {}): {}", status, message)
+            }
+            LlmError::Overflow { message } => write!(f, "Context overflow: {}", message),
+            LlmError::Auth { status, message } => {
+                write!(f, "Auth error (HTTP {}): {}", status, message)
+            }
+            LlmError::Fatal { message } => write!(f, "Fatal error: {}", message),
+        }
+    }
+}
+
+impl std::error::Error for LlmError {}
+
 pub trait Llm {
-    fn create(&mut self, params: LlmParams) -> LlmResponse;
+    fn create(&mut self, params: LlmParams) -> Result<LlmResponse, LlmError>;
 }
 
 // ---------------------------------------------------------------------------

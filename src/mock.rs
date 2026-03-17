@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 
 /// Mock LLM that returns pre-queued responses. Mirrors Python conftest.py MockLLM.
 pub struct MockLLM {
-    responses: VecDeque<LlmResponse>,
+    responses: VecDeque<Result<LlmResponse, LlmError>>,
     calls: Vec<LlmParams>,
 }
 
@@ -15,12 +15,17 @@ impl MockLLM {
         }
     }
 
-    /// Queue a response with the given stop_reason and content blocks.
+    /// Queue a successful response with the given stop_reason and content blocks.
     pub fn queue(&mut self, stop_reason: &str, content: Vec<ContentBlock>) {
-        self.responses.push_back(LlmResponse {
+        self.responses.push_back(Ok(LlmResponse {
             content,
             stop_reason: stop_reason.to_string(),
-        });
+        }));
+    }
+
+    /// Queue an error response.
+    pub fn queue_error(&mut self, error: LlmError) {
+        self.responses.push_back(Err(error));
     }
 
     /// Queue the same response `count` times, replacing `{i}` in tool_use ids.
@@ -51,17 +56,17 @@ impl MockLLM {
 }
 
 impl Llm for MockLLM {
-    fn create(&mut self, params: LlmParams) -> LlmResponse {
+    fn create(&mut self, params: LlmParams) -> Result<LlmResponse, LlmError> {
         self.calls.push(params);
-        if let Some(response) = self.responses.pop_front() {
-            response
+        if let Some(result) = self.responses.pop_front() {
+            result
         } else {
-            LlmResponse {
+            Ok(LlmResponse {
                 content: vec![ContentBlock::Text {
                     text: "(no more responses)".to_string(),
                 }],
                 stop_reason: "end_turn".to_string(),
-            }
+            })
         }
     }
 }

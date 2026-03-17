@@ -465,6 +465,133 @@ interface EventBus:
 
 ---
 
+## Cross-Cutting: Resilience Layer
+
+### ResilientLlm
+
+```pseudocode
+interface ResilientLlm:
+    inner: Llm
+    policy: RetryPolicy
+    auth: AuthProfile
+
+    function create(params: LlmParams) -> Result<LlmResponse, LlmError>
+        # Wraps inner.create() with retry logic:
+        # - Transient errors (429, 500, 502, 503): exponential backoff + jitter, retry
+        # - Auth errors (401, 403): rotate API key if available, retry
+        # - Overflow / Fatal: propagate immediately
+        # Gives up after max_attempts
+```
+
+### LlmError
+
+```pseudocode
+enum LlmError:
+    Transient { status, message }   # retryable
+    Overflow  { message }           # context too long
+    Auth      { status, message }   # authentication failure
+    Fatal     { message }           # non-retryable
+```
+
+### classify_error(status, body) -> LlmError
+
+Maps HTTP status codes and response body keywords to error variants.
+
+---
+
+## Cross-Cutting: Prompt Assembly
+
+### PromptAssembler
+
+```pseudocode
+interface PromptAssembler:
+    prompts_dir: path   # .nano-agent/prompts/
+
+    function init_defaults() -> void
+        # Creates starter prompt files (SOUL.md, IDENTITY.md, TOOLS.md, GUIDELINES.md)
+        # Does NOT overwrite existing files
+
+    function compose(ctx: PromptContext) -> string
+        # Loads layer files in order: SOUL.md, IDENTITY.md, TOOLS.md, GUIDELINES.md, MEMORY.md
+        # Substitutes placeholders: {name}, {role}, {cwd}, {tool_count}
+        # Injects dynamic sections (todo state, skills) after TOOLS.md
+        # Missing files are skipped (not defaulted)
+        # Falls back to minimal prompt if no files found
+
+    function reload() -> void
+        # Re-reads files from disk (for hot-reload of prompt edits)
+```
+
+---
+
+## Cross-Cutting: Heartbeat / Cron Scheduler
+
+### CronScheduler
+
+```pseudocode
+interface CronScheduler:
+    entries: list<CronEntry>
+    config_path: path   # .nano-agent/cron.json
+
+    function add(name, cron, prompt) -> string
+    function remove(name) -> string
+    function list() -> string
+    function tick() -> list<HeartbeatEvent>
+        # Checks all enabled entries against current time
+        # Prevents double-fire within same minute
+```
+
+### HeartbeatManager
+
+```pseudocode
+interface HeartbeatManager:
+    scheduler: CronScheduler
+    pending: list<HeartbeatEvent>
+
+    function start() -> void
+        # Spawns background thread: every 30s, calls scheduler.tick()
+        # Pushes fired events to pending queue
+
+    function drain_events() -> list<HeartbeatEvent>
+        # Atomically returns and clears pending events
+```
+
+**Integration**: Before each LLM call, drain heartbeat events and inject as `[Cron '{name}' fired]: {prompt}` messages.
+
+**Cron format**: `minute hour day-of-month month day-of-week` — supports `*`, `*/N`, specific numbers.
+
+---
+
+## Layer 7: Concurrency (Named Lanes)
+
+### BackgroundManager
+
+```pseudocode
+interface BackgroundManager:
+    lanes: map<string, Lane>        # "main" (max 1), "cron" (max 1), "background" (max 4)
+    all_tasks: map<string, TaskInfo>
+    notification_queue: list        # thread-safe
+
+    function run_in_lane(lane: string, command: string) -> string
+        # Primary method: submit to named lane
+        # Returns immediately with task_id
+        # Lane enforces max_concurrency; excess tasks queue
+
+    function run(command: string) -> string
+        # Backwards-compatible: run_in_lane("background", command)
+
+    function check(task_id: string) -> string
+    function drain_notifications() -> list
+
+    function reset_lane(lane: string) -> void
+        # Increments generation counter; queued tasks with old generation are skipped
+
+    function wait_lane_idle(lane: string) -> void
+        # Blocks until lane has no active or queued tasks
+```
+
+---
+
 ## Dependency Graph
 
 ```
@@ -474,11 +601,16 @@ L3  Delegation        → L1
 L4  Knowledge         → L1
 L5  Memory            → L1
 L6  Tasks             → L1
-L7  Concurrency       → L1
+L7  Concurrency       → L1 (named lanes: main, cron, background)
 L8  Teams             → L1, L7
 L9  Protocols         → L8
 L10 Autonomy          → L6, L8, L9
 L11 Isolation         → L6, L10
+
+Cross-cutting:
+    Resilience        wraps any Llm implementation
+    Prompt Assembly   composes system prompt from .nano-agent/prompts/
+    Heartbeat         injects cron events via Pre-LLM Injection (EP2)
 ```
 
 Each layer ONLY extends the core loop through the 5 extension points — it never modifies the loop itself.

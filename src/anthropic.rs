@@ -22,7 +22,7 @@ impl AnthropicLlm {
 }
 
 impl Llm for AnthropicLlm {
-    fn create(&mut self, params: LlmParams) -> LlmResponse {
+    fn create(&mut self, params: LlmParams) -> Result<LlmResponse, LlmError> {
         let messages_json: Vec<serde_json::Value> = params
             .messages
             .iter()
@@ -59,18 +59,16 @@ impl Llm for AnthropicLlm {
                     .unwrap_or("end_turn")
                     .to_string();
 
-                LlmResponse {
+                Ok(LlmResponse {
                     content,
                     stop_reason,
-                }
+                })
             }
             Err(ureq::Error::Status(code, response)) => {
                 let body = response.into_string().unwrap_or_default();
-                panic!("Anthropic API error (HTTP {}): {}", code, body);
+                Err(crate::resilience::classify_error(code, &body))
             }
-            Err(e) => {
-                panic!("Anthropic API request failed: {}", e);
-            }
+            Err(e) => Err(LlmError::Fatal { message: e.to_string() }),
         }
     }
 }

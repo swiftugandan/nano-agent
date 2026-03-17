@@ -201,7 +201,7 @@ pub fn translate_response_inbound(json: serde_json::Value) -> LlmResponse {
 }
 
 impl Llm for OpenAiLlm {
-    fn create(&mut self, params: LlmParams) -> LlmResponse {
+    fn create(&mut self, params: LlmParams) -> Result<LlmResponse, LlmError> {
         let oai_messages = translate_messages_outbound(&params.system, &params.messages);
         let oai_tools = translate_tools_outbound(&params.tools);
 
@@ -226,15 +226,13 @@ impl Llm for OpenAiLlm {
                 let json: serde_json::Value = response
                     .into_json()
                     .expect("Failed to parse OpenAI response as JSON");
-                translate_response_inbound(json)
+                Ok(translate_response_inbound(json))
             }
             Err(ureq::Error::Status(code, response)) => {
                 let body = response.into_string().unwrap_or_default();
-                panic!("OpenAI API error (HTTP {}): {}", code, body);
+                Err(crate::resilience::classify_error(code, &body))
             }
-            Err(e) => {
-                panic!("OpenAI API request failed: {}", e);
-            }
+            Err(e) => Err(LlmError::Fatal { message: e.to_string() }),
         }
     }
 }

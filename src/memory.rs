@@ -103,15 +103,7 @@ pub fn auto_compact(
 
     // Ask LLM to summarize
     let conversation_text = serde_json::to_string(messages).unwrap_or_default();
-    let truncated = if conversation_text.len() > 300_000 {
-        let mut end = 300_000;
-        while end > 0 && !conversation_text.is_char_boundary(end) {
-            end -= 1;
-        }
-        &conversation_text[..end]
-    } else {
-        &conversation_text
-    };
+    let truncated = crate::util::truncate_at_boundary(&conversation_text, 300_000);
 
     let response = llm.create(LlmParams {
         model: "test".to_string(),
@@ -129,15 +121,21 @@ pub fn auto_compact(
         max_tokens: 4000,
     });
 
-    let summary = response
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("");
+    let summary = match response {
+        Ok(resp) => resp
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(""),
+        Err(e) => {
+            eprintln!("[compact] LLM error during summarization: {}", e);
+            String::new()
+        }
+    };
 
     let new_messages = vec![
         serde_json::json!({
