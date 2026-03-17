@@ -1389,6 +1389,7 @@ fn scenario_22_overflow_triggers_compaction() {
         idle_signal: None,
         tool_callback: None,
         interrupt_signal: None,
+        projector: None,
     };
 
     let mut messages: Vec<serde_json::Value> =
@@ -1497,9 +1498,17 @@ fn scenario_24_prompt_assembly_with_skills_and_todos() {
         agent_role: "architect".into(),
         cwd: "/project/root".into(),
         tool_count: 34,
-        todo_state: "[ ] Design schema\n[>] Implement API\n[x] Set up CI".into(),
-        skill_descriptions: "- testing: Run tests with cargo\n- deploy: Deploy safely".into(),
         timestamp: "2026-03-17T00:00:00".into(),
+        seed_sections: vec![
+            (
+                "Current Todo List".into(),
+                "[ ] Design schema\n[>] Implement API\n[x] Set up CI".into(),
+            ),
+            (
+                "Available Skills".into(),
+                "- testing: Run tests with cargo\n- deploy: Deploy safely".into(),
+            ),
+        ],
         ..Default::default()
     };
 
@@ -1823,9 +1832,14 @@ fn scenario_30_full_new_features_integration() {
         agent_role: "full-stack".into(),
         cwd: dir.path().to_string_lossy().into(),
         tool_count: 34,
-        todo_state: "[>] Run integration test".into(),
-        skill_descriptions: "- testing: cargo test".into(),
         timestamp: "2026-03-17T00:00:00".into(),
+        seed_sections: vec![
+            (
+                "Current Todo List".into(),
+                "[>] Run integration test".into(),
+            ),
+            ("Available Skills".into(), "- testing: cargo test".into()),
+        ],
         ..Default::default()
     };
     let system = assembler.compose(&ctx);

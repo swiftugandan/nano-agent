@@ -222,11 +222,6 @@ impl UiRenderer {
         let border = Style::new().dimmed().fg(Color::Cyan);
         let label = Style::new().dimmed().fg(Color::White);
         let value = Style::new().bold().fg(Color::White);
-        let w = 50; // inner box width
-
-        let top = border.paint(format!(" \u{250C}{}\u{2510}", "\u{2500}".repeat(w)));
-        let bot = border.paint(format!(" \u{2514}{}\u{2518}", "\u{2500}".repeat(w)));
-        let pipe = border.paint("\u{2502}");
 
         let backend_val = format!("{} ({})", backend, model);
         let agent_val = format!("{} [{}]", agent_name, agent_role);
@@ -234,11 +229,30 @@ impl UiRenderer {
         let session_short: String = session_id.chars().take(36).collect();
         let history_val = format!("file (~{} entries)", history_count);
 
+        // Compute box width from the longest row (label col = 10, plus 2 for padding)
+        let min_w = 50;
+        let max_content = [
+            &backend_val,
+            &agent_val,
+            &tools_val,
+            &session_short,
+            &history_val,
+        ]
+        .iter()
+        .map(|v| 10 + v.len() + 2) // label(10) + value + inner padding(2)
+        .max()
+        .unwrap_or(min_w);
+        let w = max_content.max(min_w);
+
+        let top = border.paint(format!(" \u{250C}{}\u{2510}", "\u{2500}".repeat(w)));
+        let bot = border.paint(format!(" \u{2514}{}\u{2518}", "\u{2500}".repeat(w)));
+        let pipe = border.paint("\u{2502}");
+
         // Pad plain text to target width, then paint — avoids ANSI bytes breaking alignment
         let splash_row = |lbl: &str, val: &str| {
             let lbl_painted = label.paint(format!("{:<10}", lbl));
             let val_painted = value.paint(val);
-            let visible_len = lbl.len().max(10) + val.len();
+            let visible_len = 10 + val.len();
             let pad = (w - 2).saturating_sub(visible_len);
             format!(
                 " {}  {}{}{}{}",

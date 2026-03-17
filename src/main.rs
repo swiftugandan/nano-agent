@@ -4,6 +4,7 @@ use nano_agent::autonomy;
 use nano_agent::channels::{ChannelManager, CliChannel};
 use nano_agent::cli::Cli;
 use nano_agent::concurrency::BackgroundManager;
+use nano_agent::context::{MemorySeed, Projector, SeedCollector, SkillSeed, TaskSeed, TodoSeed};
 use nano_agent::core_loop::run_agent_loop;
 use nano_agent::delivery::{DeliveryQueue, DeliveryRunner};
 use nano_agent::dispatch::{
@@ -17,9 +18,7 @@ use nano_agent::memory;
 use nano_agent::memory_store::MemoryStore;
 use nano_agent::openai::OpenAiLlm;
 use nano_agent::planning::{NagPolicy, TodoManager};
-use nano_agent::prompt::{
-    build_prompt_context, extract_last_response_text, format_recalled_memories, PromptAssembler,
-};
+use nano_agent::prompt::{build_prompt_context, extract_last_response_text, PromptAssembler};
 use nano_agent::protocols::RequestTracker;
 use nano_agent::tasks::TaskManager;
 use nano_agent::teams::{MessageBus, TeammateManager};
@@ -192,6 +191,18 @@ fn main() {
     let mut prompt_assembler = PromptAssembler::new(&data_dir.join("prompts"));
     prompt_assembler.init_defaults();
 
+    // -- Projector: demand-paging write gate (8K char threshold)
+    let projections_dir = data_dir.join("projections");
+    let projector = Projector::new(&projections_dir, 8_000);
+
+    // -- SeedCollector: uniform system prompt contribution
+    let memory_seed = Arc::new(MemorySeed::new(Arc::clone(&memory_store)));
+    let mut seed_collector = SeedCollector::new();
+    seed_collector.register(Arc::new(TodoSeed::new(Arc::clone(&todo_manager))));
+    seed_collector.register(Arc::new(SkillSeed::new(Arc::clone(&skill_loader))));
+    seed_collector.register(Arc::new(TaskSeed::new(Arc::clone(&task_manager))));
+    seed_collector.register(Arc::clone(&memory_seed) as Arc<dyn nano_agent::context::Seed>);
+
     // -- Register self as a teammate (skip in oneshot — avoids disk writes)
     if !oneshot {
         teammate_manager
@@ -269,12 +280,14 @@ fn main() {
     };
 
     let mut prev_message_count = messages.len();
+    let mut turn_count: usize = 0;
 
     // -- One-shot mode: run prompt, print response, exit
     if let Some(prompt) = oneshot_prompt {
+        let projected_input = projector.project("user_input", "oneshot", &prompt);
         messages.push(serde_json::json!({
             "role": "user",
-            "content": prompt.as_str(),
+            "content": projected_input.as_str(),
         }));
 
         // Pre-turn pipeline (same as REPL)
@@ -283,25 +296,19 @@ fn main() {
             messages.insert(0, identity);
         }
 
-        let recalled_memories = format_recalled_memories(&memory_store.recall(&prompt, 3));
+        // Set query for memory recall seed
+        memory_seed.set_query(&prompt);
 
-        let todo_state = todo_manager
-            .read()
-            .expect("TodoManager read lock poisoned")
-            .render();
-        let skill_desc = skill_loader.get_descriptions();
         prompt_assembler.reload();
         let ctx = build_prompt_context(
             &agent_name,
             &agent_role,
             &cwd,
             tool_defs.len(),
-            todo_state,
-            skill_desc,
             &model_name,
             &agent_id,
             &session_id,
-            recalled_memories,
+            seed_collector.render(),
         );
         let system = prompt_assembler.compose(&ctx);
 
@@ -311,6 +318,7 @@ fn main() {
             idle_signal: None,
             tool_callback: None,
             interrupt_signal: Some(&interrupt_signal),
+            projector: Some(&projector),
         };
         run_agent_loop(
             llm_box.as_mut(),
@@ -456,10 +464,13 @@ fn main() {
             _ => {}
         }
 
-        // -- Add user message
+        // -- Add user message (projected through demand-paging gate)
+        turn_count += 1;
+        let turn_key = format!("turn_{}", turn_count);
+        let projected_input = projector.project("user_input", &turn_key, &input);
         messages.push(serde_json::json!({
             "role": "user",
-            "content": input.as_str(),
+            "content": projected_input.as_str(),
         }));
 
         // -- Pre-turn pipeline
@@ -482,7 +493,7 @@ fn main() {
             UiRenderer::show_compact_notice(&path.display().to_string());
         }
 
-        // Render todo state once for both nag policy and prompt assembly
+        // Render todo state once for nag policy
         let todo_state = todo_manager
             .read()
             .expect("TodoManager read lock poisoned")
@@ -501,7 +512,7 @@ fn main() {
             }
         }
 
-        // L7: Drain background notifications
+        // L7: Drain background notifications (projected)
         {
             let notifs = background_manager
                 .lock()
@@ -525,20 +536,24 @@ fn main() {
                         )
                     })
                     .collect();
-                messages.push(serde_json::json!({"role": "user", "content": text.join("\n")}));
+                let raw = text.join("\n");
+                let projected =
+                    projector.project("background", &format!("turn_{}", turn_count), &raw);
+                messages.push(serde_json::json!({"role": "user", "content": projected}));
             }
         }
 
-        // L8: Check inbox
+        // L8: Check inbox (projected)
         {
             let inbox = message_bus.read_inbox(&agent_name);
             if !inbox.is_empty() {
                 let text = autonomy::format_inbox(&inbox);
-                messages.push(serde_json::json!({"role": "user", "content": text}));
+                let projected = projector.project("inbox", &format!("turn_{}", turn_count), &text);
+                messages.push(serde_json::json!({"role": "user", "content": projected}));
             }
         }
 
-        // -- Heartbeat: drain cron events
+        // -- Heartbeat: drain cron events (projected)
         {
             let events = heartbeat_manager.drain_events();
             if !events.is_empty() {
@@ -547,27 +562,26 @@ fn main() {
                     .map(|e| format!("[Cron '{}' fired]: {}", e.name, e.prompt))
                     .collect::<Vec<_>>()
                     .join("\n");
-                messages.push(serde_json::json!({"role": "user", "content": text}));
+                let projected =
+                    projector.project("heartbeat", &format!("turn_{}", turn_count), &text);
+                messages.push(serde_json::json!({"role": "user", "content": projected}));
             }
         }
 
-        // -- GAP 5: Recall memories relevant to the user's input
-        let recalled_memories = format_recalled_memories(&memory_store.recall(&input, 3));
+        // -- Set memory recall query for this turn's seed
+        memory_seed.set_query(&input);
 
-        // -- Build dynamic system prompt via assembler
-        let skill_desc = skill_loader.get_descriptions();
+        // -- Build dynamic system prompt via assembler with seed sections
         prompt_assembler.reload();
         let ctx = build_prompt_context(
             &agent_name,
             &agent_role,
             &cwd,
             tool_defs.len(),
-            todo_state,
-            skill_desc,
             &model_name,
             &agent_id,
             &session_id,
-            recalled_memories,
+            seed_collector.render(),
         );
         let system = prompt_assembler.compose(&ctx);
 
@@ -611,6 +625,7 @@ fn main() {
             idle_signal: None,
             tool_callback: Some(&tool_cb),
             interrupt_signal: Some(&interrupt_signal),
+            projector: Some(&projector),
         };
         let _calls = run_agent_loop(
             llm_box.as_mut(),

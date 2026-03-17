@@ -132,10 +132,15 @@ pub fn run_agent_loop(
                     }
                 }
 
+                let projected = if let Some(proj) = signals.projector {
+                    proj.project("tool_results", id, &output)
+                } else {
+                    output
+                };
                 results.push(serde_json::json!({
                     "type": "tool_result",
                     "tool_use_id": id,
-                    "content": output,
+                    "content": projected,
                 }));
             }
         }

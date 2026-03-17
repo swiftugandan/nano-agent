@@ -308,15 +308,6 @@ mod tests {
         }
     }
 
-    fn text_response() -> LlmResponse {
-        LlmResponse {
-            content: vec![ContentBlock::Text {
-                text: "ok".to_string(),
-            }],
-            stop_reason: "end_turn".to_string(),
-        }
-    }
-
     fn make_params() -> LlmParams {
         LlmParams {
             model: "test".to_string(),

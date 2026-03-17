@@ -3,6 +3,7 @@ pub mod autonomy;
 pub mod channels;
 pub mod cli;
 pub mod concurrency;
+pub mod context;
 pub mod core_loop;
 pub mod delegation;
 pub mod delivery;

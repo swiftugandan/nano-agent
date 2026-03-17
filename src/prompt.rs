@@ -11,15 +11,13 @@ pub struct PromptContext {
     pub agent_role: String,
     pub cwd: String,
     pub tool_count: usize,
-    pub todo_state: String,
-    pub skill_descriptions: String,
     // GAP 4: Runtime context injection
     pub timestamp: String,
     pub model_id: String,
     pub agent_id: String,
     pub session_id: String,
-    // GAP 3/5: Recalled memories from TF-IDF search
-    pub recalled_memories: String,
+    /// Dynamic seed sections from SeedCollector::render()
+    pub seed_sections: Vec<(String, String)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -141,35 +139,24 @@ impl PromptAssembler {
     pub fn compose(&self, ctx: &PromptContext) -> String {
         let mut parts: Vec<String> = Vec::new();
 
-        // Static layers from files (with placeholder substitution)
-        for (filename, content) in &self.layers {
-            let substituted = substitute(content, ctx);
-            // Insert dynamic sections after TOOLS.md
-            parts.push(substituted);
-            if filename == "TOOLS.md" {
-                // Dynamic: todo state
-                if !ctx.todo_state.is_empty() {
-                    parts.push(format!("## Current Todo List\n{}", ctx.todo_state));
-                }
-                // Dynamic: skill descriptions
-                if !ctx.skill_descriptions.is_empty() {
-                    parts.push(format!("## Available Skills\n{}", ctx.skill_descriptions));
-                }
-            }
-        }
-
-        // GAP 5: Inject recalled memories if present
-        if !ctx.recalled_memories.is_empty() {
-            parts.push(format!("## Recalled Memories\n{}", ctx.recalled_memories));
-        }
-
-        // If no files were loaded, fall back to a minimal prompt
-        if parts.is_empty() {
+        // If no layer files were loaded, fall back to a minimal prompt
+        if self.layers.is_empty() {
             return format!(
                 "You are an autonomous coding agent named '{}' (role: {}) working in {}.\n\
                  You have {} tools available.",
                 ctx.agent_name, ctx.agent_role, ctx.cwd, ctx.tool_count,
             );
+        }
+
+        // Static layers from files (with placeholder substitution)
+        for (_filename, content) in &self.layers {
+            let substituted = substitute(content, ctx);
+            parts.push(substituted);
+        }
+
+        // Dynamic seed sections appended after all static layers
+        for (name, text) in &ctx.seed_sections {
+            parts.push(format!("## {}\n{}", name, text));
         }
 
         parts.join("\n\n")
@@ -204,33 +191,21 @@ pub fn build_prompt_context(
     agent_role: &str,
     cwd: &Path,
     tool_count: usize,
-    todo_state: String,
-    skill_desc: String,
     model_name: &str,
     agent_id: &str,
     session_id: &str,
-    recalled_memories: String,
+    seed_sections: Vec<(String, String)>,
 ) -> PromptContext {
     PromptContext {
         agent_name: agent_name.to_string(),
         agent_role: agent_role.to_string(),
         cwd: cwd.display().to_string(),
         tool_count,
-        todo_state: if todo_state.is_empty() {
-            "(empty)".into()
-        } else {
-            todo_state
-        },
-        skill_descriptions: if skill_desc.is_empty() {
-            "(none loaded)".into()
-        } else {
-            skill_desc
-        },
         timestamp: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
         model_id: model_name.to_string(),
         agent_id: agent_id.to_string(),
         session_id: session_id.to_string(),
-        recalled_memories,
+        seed_sections,
     }
 }
 

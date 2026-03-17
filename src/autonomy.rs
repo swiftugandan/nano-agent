@@ -118,6 +118,7 @@ pub fn run_teammate_lifecycle(
             idle_signal: Some(idle_signal),
             tool_callback: None,
             interrupt_signal: None,
+            projector: None,
         };
 
         run_agent_loop(llm, system, messages, tools, dispatch, &signals);

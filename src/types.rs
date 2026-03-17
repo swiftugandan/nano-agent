@@ -200,6 +200,7 @@ pub struct LoopSignals<'a> {
     pub idle_signal: Option<&'a AtomicBool>,
     pub tool_callback: Option<&'a dyn Fn(ToolEvent)>,
     pub interrupt_signal: Option<&'a AtomicBool>,
+    pub projector: Option<&'a crate::context::Projector>,
 }
 
 impl<'a> LoopSignals<'a> {
@@ -210,6 +211,7 @@ impl<'a> LoopSignals<'a> {
             idle_signal: None,
             tool_callback: None,
             interrupt_signal: None,
+            projector: None,
         }
     }
 }

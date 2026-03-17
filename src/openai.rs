@@ -39,6 +39,8 @@ struct OaiChoice {
 struct OaiMessage {
     content: Option<String>,
     tool_calls: Option<Vec<OaiToolCall>>,
+    /// Reasoning models (e.g. stepfun) may put their answer here instead of `content`.
+    reasoning: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,10 +167,21 @@ pub fn translate_response_inbound(json: serde_json::Value) -> LlmResponse {
     let choice = &oai.choices[0];
     let mut content = Vec::new();
 
-    if let Some(text) = &choice.message.content {
-        if !text.is_empty() {
-            content.push(ContentBlock::Text { text: text.clone() });
-        }
+    // Prefer content; fall back to reasoning for reasoning-only models
+    let text = choice
+        .message
+        .content
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or(choice
+            .message
+            .reasoning
+            .as_deref()
+            .filter(|s| !s.is_empty()));
+    if let Some(text) = text {
+        content.push(ContentBlock::Text {
+            text: text.to_string(),
+        });
     }
 
     if let Some(tool_calls) = &choice.message.tool_calls {

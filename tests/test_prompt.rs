@@ -7,9 +7,14 @@ fn make_context() -> PromptContext {
         agent_role: "developer".into(),
         cwd: "/tmp/project".into(),
         tool_count: 25,
-        todo_state: "[ ] Fix bug".into(),
-        skill_descriptions: "deploy: Deploy to production".into(),
         timestamp: "2026-03-17T00:00:00".into(),
+        seed_sections: vec![
+            ("Current Todo List".into(), "[ ] Fix bug".into()),
+            (
+                "Available Skills".into(),
+                "deploy: Deploy to production".into(),
+            ),
+        ],
         ..Default::default()
     }
 }
