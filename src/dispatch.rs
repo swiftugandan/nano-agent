@@ -1,25 +1,20 @@
 use crate::anthropic::AnthropicLlm;
 use crate::autonomy;
-use crate::concurrency::{BackgroundManager, LANE_BACKGROUND};
+use crate::concurrency::LANE_BACKGROUND;
 use crate::delegation::{child_tools, SubagentFactory};
-use crate::delivery::{self, DeliveryQueue};
-use crate::heartbeat::HeartbeatManager;
-use crate::isolation::{EventBus, WorktreeManager};
-use crate::knowledge::SkillLoader;
-use crate::memory_store::MemoryStore;
+use crate::delivery;
+use crate::handler::{
+    exec_err, require_i64, require_str, AgentContext, HandlerError, HandlerRegistry, HandlerResult,
+};
+use crate::isolation::WorktreeManager;
 use crate::openai::OpenAiLlm;
-use crate::planning::{NagPolicy, TodoItem, TodoManager};
-use crate::protocols::RequestTracker;
+use crate::planning::TodoItem;
 use crate::resilience::{AuthProfile, ContextGuard, ResilientLlm, RetryPolicy};
-use crate::tasks::TaskManager;
-use crate::teams::{MessageBus, TeammateManager};
 use crate::tools;
 use crate::types::*;
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // LLM factory
@@ -52,223 +47,23 @@ pub fn wrap_llm(
 }
 
 // ---------------------------------------------------------------------------
-// Build extended dispatch closures (L2–L11)
+// Build extended handler registry (L2–L11)
 // ---------------------------------------------------------------------------
 
-pub struct AgentConfig {
-    pub repo_root: PathBuf,
-    pub tasks_dir: PathBuf,
-    pub agent_name: String,
-    pub llm_backend: String,
-}
-
-pub struct Services {
-    pub todo: Arc<RwLock<TodoManager>>,
-    pub nag: Arc<Mutex<NagPolicy>>,
-    pub skill_loader: Arc<SkillLoader>,
-    pub task_manager: Arc<RwLock<TaskManager>>,
-    pub bg: Arc<Mutex<BackgroundManager>>,
-    pub message_bus: Arc<MessageBus>,
-    pub teammate_manager: Arc<RwLock<TeammateManager>>,
-    pub request_tracker: Arc<RequestTracker>,
-    pub event_bus: Arc<EventBus>,
-    pub heartbeat_manager: Arc<HeartbeatManager>,
-    pub memory_store: Arc<MemoryStore>,
-    pub delivery_queue: Arc<DeliveryQueue>,
-}
-
-pub struct DispatchContext {
-    pub config: AgentConfig,
-    pub services: Services,
-    pub compact_signal: Arc<CompactSignal>,
-    pub idle_signal: Arc<AtomicBool>,
-}
-
-// ---------------------------------------------------------------------------
-// Dispatch macros — reduce boilerplate for common tool handler patterns
-// ---------------------------------------------------------------------------
-
-/// Pattern A (str field, write lock): Extract a string field from input, write-lock a service, call a method.
-/// Usage: `dispatch_str!(dispatch, "tool_name", "field", service, method, "ServiceType")`
-macro_rules! dispatch_str {
-    ($dispatch:ident, $tool:expr, $field:expr, $svc:expr, $method:ident, $label:expr) => {{
-        let svc = Arc::clone(&$svc);
-        $dispatch.insert(
-            $tool.into(),
-            Box::new(
-                move |input| match input.get($field).and_then(|v| v.as_str()) {
-                    Some(val) => svc
-                        .write()
-                        .expect(concat!($label, " write lock poisoned"))
-                        .$method(val),
-                    None => format!("Error: missing '{}' field", $field),
-                },
-            ),
-        );
-    }};
-}
-
-/// Pattern A (str field, read lock): Extract a string field from input, read-lock a service, call a method.
-/// Usage: `dispatch_str_read!(dispatch, "tool_name", "field", service, method, "ServiceType")`
-#[allow(unused_macros)]
-macro_rules! dispatch_str_read {
-    ($dispatch:ident, $tool:expr, $field:expr, $svc:expr, $method:ident, $label:expr) => {{
-        let svc = Arc::clone(&$svc);
-        $dispatch.insert(
-            $tool.into(),
-            Box::new(
-                move |input| match input.get($field).and_then(|v| v.as_str()) {
-                    Some(val) => svc
-                        .read()
-                        .expect(concat!($label, " read lock poisoned"))
-                        .$method(val),
-                    None => format!("Error: missing '{}' field", $field),
-                },
-            ),
-        );
-    }};
-}
-
-/// Pattern A (i64 field): Extract an i64 field from input, write-lock a service, call a method.
-/// Usage: `dispatch_i64!(dispatch, "tool_name", "field", service, method, "ServiceType")`
-#[allow(unused_macros)]
-macro_rules! dispatch_i64 {
-    ($dispatch:ident, $tool:expr, $field:expr, $svc:expr, $method:ident, $label:expr) => {{
-        let svc = Arc::clone(&$svc);
-        $dispatch.insert(
-            $tool.into(),
-            Box::new(
-                move |input| match input.get($field).and_then(|v| v.as_i64()) {
-                    Some(val) => svc
-                        .write()
-                        .expect(concat!($label, " write lock poisoned"))
-                        .$method(val),
-                    None => format!("Error: missing '{}' field", $field),
-                },
-            ),
-        );
-    }};
-}
-
-/// Pattern B (no input): Write-lock a service and call a method with no arguments.
-/// Usage: `dispatch_noarg!(dispatch, "tool_name", service, method, "ServiceType")`
-#[allow(unused_macros)]
-macro_rules! dispatch_noarg {
-    ($dispatch:ident, $tool:expr, $svc:expr, $method:ident, $label:expr) => {{
-        let svc = Arc::clone(&$svc);
-        $dispatch.insert(
-            $tool.into(),
-            Box::new(move |_| {
-                svc.write()
-                    .expect(concat!($label, " write lock poisoned"))
-                    .$method()
-            }),
-        );
-    }};
-}
-
-/// Pattern B-read (no input): Read-lock a service and call a method with no arguments.
-/// Usage: `dispatch_noarg_read!(dispatch, "tool_name", service, method, "ServiceType")`
-macro_rules! dispatch_noarg_read {
-    ($dispatch:ident, $tool:expr, $svc:expr, $method:ident, $label:expr) => {{
-        let svc = Arc::clone(&$svc);
-        $dispatch.insert(
-            $tool.into(),
-            Box::new(move |_| {
-                svc.read()
-                    .expect(concat!($label, " read lock poisoned"))
-                    .$method()
-            }),
-        );
-    }};
-}
-
-/// Pattern A-read (i64 field): Extract an i64 field from input, read-lock a service, call a method.
-/// Usage: `dispatch_i64_read!(dispatch, "tool_name", "field", service, method, "ServiceType")`
-macro_rules! dispatch_i64_read {
-    ($dispatch:ident, $tool:expr, $field:expr, $svc:expr, $method:ident, $label:expr) => {{
-        let svc = Arc::clone(&$svc);
-        $dispatch.insert(
-            $tool.into(),
-            Box::new(
-                move |input| match input.get($field).and_then(|v| v.as_i64()) {
-                    Some(val) => svc
-                        .read()
-                        .expect(concat!($label, " read lock poisoned"))
-                        .$method(val),
-                    None => format!("Error: missing '{}' field", $field),
-                },
-            ),
-        );
-    }};
-}
-
-/// Pattern B (no input, no lock): Call a method on an Arc<T> with no arguments and no Mutex.
-/// Usage: `dispatch_noarg_direct!(dispatch, "tool_name", service, method)`
-macro_rules! dispatch_noarg_direct {
-    ($dispatch:ident, $tool:expr, $svc:expr, $method:ident) => {{
-        let svc = Arc::clone(&$svc);
-        $dispatch.insert($tool.into(), Box::new(move |_| svc.$method()));
-    }};
-}
-
-/// Pattern A (str field, no lock): Extract a string field, call a method on Arc<T> directly.
-/// Usage: `dispatch_str_direct!(dispatch, "tool_name", "field", service, method)`
-macro_rules! dispatch_str_direct {
-    ($dispatch:ident, $tool:expr, $field:expr, $svc:expr, $method:ident) => {{
-        let svc = Arc::clone(&$svc);
-        $dispatch.insert(
-            $tool.into(),
-            Box::new(
-                move |input| match input.get($field).and_then(|v| v.as_str()) {
-                    Some(val) => svc.$method(val),
-                    None => format!("Error: missing '{}' field", $field),
-                },
-            ),
-        );
-    }};
-}
-
-pub fn build_extended_dispatch(ctx: DispatchContext) -> Dispatch {
-    let DispatchContext {
-        config:
-            AgentConfig {
-                repo_root,
-                tasks_dir,
-                agent_name,
-                llm_backend,
-            },
-        services:
-            Services {
-                todo,
-                nag,
-                skill_loader,
-                task_manager,
-                bg,
-                message_bus,
-                teammate_manager,
-                request_tracker,
-                event_bus,
-                heartbeat_manager,
-                memory_store,
-                delivery_queue,
-            },
-        compact_signal,
-        idle_signal,
-    } = ctx;
-    let mut dispatch: Dispatch = HashMap::new();
+pub fn build_extended_registry(ctx: &AgentContext) -> HandlerRegistry {
+    let mut reg = HandlerRegistry::new();
 
     // -- L2: todo_update
-    {
-        let todo = Arc::clone(&todo);
-        let nag = Arc::clone(&nag);
-        dispatch.insert(
-            "todo_update".into(),
-            Box::new(move |input| {
-                let items_val = match input.get("items").and_then(|v| v.as_array()) {
-                    Some(a) => a,
-                    None => return "Error: missing 'items' array".into(),
-                };
+    reg.register(
+        "todo_update",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let items_val = input
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| HandlerError::Validation {
+                        message: "missing 'items' array".into(),
+                    })?;
                 let items: Vec<TodoItem> = items_val
                     .iter()
                     .filter_map(|v| {
@@ -279,54 +74,86 @@ pub fn build_extended_dispatch(ctx: DispatchContext) -> Dispatch {
                         })
                     })
                     .collect();
-                let mut t = todo.write().expect("TodoManager write lock poisoned");
-                match t.update(items) {
-                    Ok(rendered) => {
-                        nag.lock().expect("NagPolicy lock poisoned").reset();
-                        rendered
-                    }
-                    Err(e) => format!("Error: {}", e),
-                }
-            }),
-        );
-    }
+                let mut t = ctx
+                    .services
+                    .todo
+                    .write()
+                    .expect("TodoManager write lock poisoned");
+                let rendered = t.update(items).map_err(exec_err)?;
+                ctx.services
+                    .nag
+                    .lock()
+                    .expect("NagPolicy lock poisoned")
+                    .reset();
+                Ok(rendered)
+            },
+        ),
+    );
 
     // -- L2: todo_read
-    dispatch_noarg_read!(dispatch, "todo_read", todo, render, "TodoManager");
+    reg.register(
+        "todo_read",
+        Arc::new(
+            |ctx: &AgentContext, _input: serde_json::Value| -> HandlerResult {
+                Ok(ctx
+                    .services
+                    .todo
+                    .read()
+                    .expect("TodoManager read lock poisoned")
+                    .render())
+            },
+        ),
+    );
 
     // -- L4: read_skill
-    dispatch_str_direct!(dispatch, "read_skill", "name", skill_loader, get_content);
+    reg.register(
+        "read_skill",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let name = require_str(&input, "name")?;
+                Ok(ctx.services.skill_loader.get_content(name))
+            },
+        ),
+    );
 
-    // -- L6: task_create (writes files + increments AtomicI64, needs write lock)
-    dispatch_str!(
-        dispatch,
+    // -- L6: task_create
+    reg.register(
         "task_create",
-        "subject",
-        task_manager,
-        create,
-        "TaskManager"
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let subject = require_str(&input, "subject")?;
+                Ok(ctx
+                    .services
+                    .task_manager
+                    .write()
+                    .expect("TaskManager write lock poisoned")
+                    .create(subject))
+            },
+        ),
     );
 
     // -- L6: task_get
-    dispatch_i64_read!(
-        dispatch,
+    reg.register(
         "task_get",
-        "task_id",
-        task_manager,
-        get,
-        "TaskManager"
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let task_id = require_i64(&input, "task_id")?;
+                Ok(ctx
+                    .services
+                    .task_manager
+                    .read()
+                    .expect("TaskManager read lock poisoned")
+                    .get(task_id))
+            },
+        ),
     );
 
     // -- L6: task_update
-    {
-        let tm = Arc::clone(&task_manager);
-        dispatch.insert(
-            "task_update".into(),
-            Box::new(move |input| {
-                let task_id = match input.get("task_id").and_then(|v| v.as_i64()) {
-                    Some(id) => id,
-                    None => return "Error: missing 'task_id' field".into(),
-                };
+    reg.register(
+        "task_update",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let task_id = require_i64(&input, "task_id")?;
                 let status = input.get("status").and_then(|v| v.as_str());
                 let blocked_by: Option<Vec<i64>> = input
                     .get("add_blocked_by")
@@ -336,428 +163,347 @@ pub fn build_extended_dispatch(ctx: DispatchContext) -> Dispatch {
                     .get("add_blocks")
                     .and_then(|v| v.as_array())
                     .map(|a| a.iter().filter_map(|v| v.as_i64()).collect());
-                let tm = tm.read().expect("TaskManager read lock poisoned");
-                match tm.update(task_id, status, blocked_by.as_deref(), blocks.as_deref()) {
-                    Ok(s) => s,
-                    Err(e) => format!("Error: {}", e),
-                }
-            }),
-        );
-    }
+                let tm = ctx
+                    .services
+                    .task_manager
+                    .read()
+                    .expect("TaskManager read lock poisoned");
+                tm.update(task_id, status, blocked_by.as_deref(), blocks.as_deref())
+                    .map_err(exec_err)
+            },
+        ),
+    );
 
     // -- L6: task_list
-    dispatch_noarg_read!(dispatch, "task_list", task_manager, list_all, "TaskManager");
+    reg.register(
+        "task_list",
+        Arc::new(
+            |ctx: &AgentContext, _input: serde_json::Value| -> HandlerResult {
+                Ok(ctx
+                    .services
+                    .task_manager
+                    .read()
+                    .expect("TaskManager read lock poisoned")
+                    .list_all())
+            },
+        ),
+    );
 
     // -- L7: background_run
-    {
-        let bg = Arc::clone(&bg);
-        dispatch.insert(
-            "background_run".into(),
-            Box::new(move |input| {
-                let cmd = match input.get("command").and_then(|v| v.as_str()) {
-                    Some(c) => c,
-                    None => return "Error: missing 'command' field".into(),
-                };
+    reg.register(
+        "background_run",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let cmd = require_str(&input, "command")?;
                 let lane = input
                     .get("lane")
                     .and_then(|v| v.as_str())
                     .unwrap_or(LANE_BACKGROUND);
-                bg.lock()
+                Ok(ctx
+                    .services
+                    .bg
+                    .lock()
                     .expect("BackgroundManager lock poisoned")
-                    .run_in_lane(lane, cmd)
-            }),
-        );
-    }
+                    .run_in_lane(lane, cmd))
+            },
+        ),
+    );
 
     // -- L7: background_check
-    {
-        let svc = Arc::clone(&bg);
-        dispatch.insert(
-            "background_check".into(),
-            Box::new(
-                move |input| match input.get("task_id").and_then(|v| v.as_str()) {
-                    Some(val) => svc
-                        .lock()
-                        .expect("BackgroundManager lock poisoned")
-                        .check(val),
-                    None => "Error: missing 'task_id' field".into(),
-                },
-            ),
-        );
-    }
+    reg.register(
+        "background_check",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let task_id = require_str(&input, "task_id")?;
+                Ok(ctx
+                    .services
+                    .bg
+                    .lock()
+                    .expect("BackgroundManager lock poisoned")
+                    .check(task_id))
+            },
+        ),
+    );
 
     // -- L8: send_message
-    {
-        let bus = Arc::clone(&message_bus);
-        let name = agent_name.clone();
-        dispatch.insert(
-            "send_message".into(),
-            Box::new(move |input| {
-                let to = match input.get("to").and_then(|v| v.as_str()) {
-                    Some(t) => t,
-                    None => return "Error: missing 'to' field".into(),
-                };
-                let content = match input.get("content").and_then(|v| v.as_str()) {
-                    Some(c) => c,
-                    None => return "Error: missing 'content' field".into(),
-                };
-                bus.send(&name, to, content)
-            }),
-        );
-    }
+    reg.register(
+        "send_message",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let to = require_str(&input, "to")?;
+                let content = require_str(&input, "content")?;
+                Ok(ctx
+                    .services
+                    .message_bus
+                    .send(&ctx.identity.name, to, content))
+            },
+        ),
+    );
 
     // -- L8: broadcast_message
-    {
-        let bus = Arc::clone(&message_bus);
-        let tm_mgr = Arc::clone(&teammate_manager);
-        let name = agent_name.clone();
-        dispatch.insert(
-            "broadcast_message".into(),
-            Box::new(move |input| {
-                let content = match input.get("content").and_then(|v| v.as_str()) {
-                    Some(c) => c,
-                    None => return "Error: missing 'content' field".into(),
-                };
-                let names = tm_mgr
+    reg.register(
+        "broadcast_message",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let content = require_str(&input, "content")?;
+                let names = ctx
+                    .services
+                    .teammate_manager
                     .read()
                     .expect("TeammateManager read lock poisoned")
                     .member_names();
-                bus.broadcast(&name, content, &names)
-            }),
-        );
-    }
+                Ok(ctx
+                    .services
+                    .message_bus
+                    .broadcast(&ctx.identity.name, content, &names))
+            },
+        ),
+    );
 
     // -- L8: read_inbox
-    {
-        let bus = Arc::clone(&message_bus);
-        let name = agent_name.clone();
-        dispatch.insert(
-            "read_inbox".into(),
-            Box::new(move |_| {
-                let msgs = bus.read_inbox(&name);
+    reg.register(
+        "read_inbox",
+        Arc::new(
+            |ctx: &AgentContext, _input: serde_json::Value| -> HandlerResult {
+                let msgs = ctx.services.message_bus.read_inbox(&ctx.identity.name);
                 if msgs.is_empty() {
-                    "No messages.".into()
+                    Ok("No messages.".into())
                 } else {
-                    serde_json::to_string_pretty(&msgs)
-                        .unwrap_or_else(|_| "Error reading inbox".into())
+                    Ok(serde_json::to_string_pretty(&msgs)
+                        .unwrap_or_else(|_| "Error reading inbox".into()))
                 }
-            }),
-        );
-    }
+            },
+        ),
+    );
 
     // -- L8: list_teammates
-    dispatch_noarg_read!(
-        dispatch,
+    reg.register(
         "list_teammates",
-        teammate_manager,
-        list_all,
-        "TeammateManager"
+        Arc::new(
+            |ctx: &AgentContext, _input: serde_json::Value| -> HandlerResult {
+                Ok(ctx
+                    .services
+                    .teammate_manager
+                    .read()
+                    .expect("TeammateManager read lock poisoned")
+                    .list_all())
+            },
+        ),
     );
 
     // -- L8: spawn_teammate (with real lifecycle thread)
     {
-        let tm_mgr = Arc::clone(&teammate_manager);
-        let bus = Arc::clone(&message_bus);
-        let tasks_d = tasks_dir.clone();
-        let backend = llm_backend.clone();
-        let cwd = repo_root.clone();
-        let transcript_d = cwd.join(".nano-agent").join("transcripts");
-        let sk_loader = Arc::clone(&skill_loader);
-        let t_manager = Arc::clone(&task_manager);
-        let bg_mgr = Arc::clone(&bg);
-        let req_tracker = Arc::clone(&request_tracker);
-        let ev_bus = Arc::clone(&event_bus);
-        let todo_mgr = Arc::clone(&todo);
-        let nag_pol = Arc::clone(&nag);
-        let hb_mgr = Arc::clone(&heartbeat_manager);
-        let mem_store = Arc::clone(&memory_store);
-        let del_queue = Arc::clone(&delivery_queue);
-        dispatch.insert(
-            "spawn_teammate".into(),
-            Box::new(move |input| {
-                let name = match input.get("name").and_then(|v| v.as_str()) {
-                    Some(n) => n.to_string(),
-                    None => return "Error: missing 'name'".into(),
-                };
-                let role = match input.get("role").and_then(|v| v.as_str()) {
-                    Some(r) => r.to_string(),
-                    None => return "Error: missing 'role'".into(),
-                };
-                let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
-                    Some(p) => p.to_string(),
-                    None => return "Error: missing 'prompt'".into(),
-                };
+        let parent_ctx = ctx.clone();
+        reg.register(
+            "spawn_teammate",
+            Arc::new(move |_ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let name = require_str(&input, "name")?.to_string();
+                let role = require_str(&input, "role")?.to_string();
+                let prompt = require_str(&input, "prompt")?.to_string();
 
                 // Register teammate
-                let result = tm_mgr
+                let result = parent_ctx
+                    .services.teammate_manager
                     .write()
                     .expect("TeammateManager write lock poisoned")
                     .spawn(&name, &role, &prompt);
                 if result.starts_with("Error") {
-                    return result;
+                    return Err(HandlerError::Execution { message: result });
                 }
 
-                // Clone everything needed for the thread
-                let tm_mgr_t = Arc::clone(&tm_mgr);
-                let bus_t = Arc::clone(&bus);
-                let tasks_d_t = tasks_d.clone();
-                let transcript_d_t = transcript_d.clone();
-                let backend_t = backend.clone();
-                let cwd_t = cwd.clone();
-                let sk_loader_t = Arc::clone(&sk_loader);
-                let t_manager_t = Arc::clone(&t_manager);
-                let bg_mgr_t = Arc::clone(&bg_mgr);
-                let req_tracker_t = Arc::clone(&req_tracker);
-                let ev_bus_t = Arc::clone(&ev_bus);
-                let todo_mgr_t = Arc::clone(&todo_mgr);
-                let nag_pol_t = Arc::clone(&nag_pol);
-                let hb_mgr_t = Arc::clone(&hb_mgr);
-                let mem_store_t = Arc::clone(&mem_store);
-                let del_queue_t = Arc::clone(&del_queue);
-                let name_t = name.clone();
-                let role_t = role.clone();
-                let prompt_t = prompt.clone();
+                let transcript_d = parent_ctx.cwd.join(".nano-agent").join("transcripts");
+
+                let child_ctx = parent_ctx.child_context(
+                    name.clone(),
+                    role.clone(),
+                    Some(transcript_d.clone()),
+                );
 
                 std::thread::spawn(move || {
-                    let inner_llm = create_llm(&backend_t);
-                    let mut llm_box =
-                        wrap_llm(inner_llm, auth_prefix_for(&backend_t), &transcript_d_t);
+                    let inner_llm = create_llm(&child_ctx.llm_backend);
+                    let mut llm_box = wrap_llm(
+                        inner_llm,
+                        auth_prefix_for(&child_ctx.llm_backend),
+                        &transcript_d,
+                    );
 
-                    // Build tool defs + dispatch for the teammate
+                    // Build tool defs + registry for the teammate
                     let mut tool_defs = tools::tool_definitions();
                     tool_defs.extend(tools::extended_tool_definitions());
 
-                    // Teammates only need idle_signal (compact is handled by lifecycle)
-                    let teammate_compact = Arc::new(CompactSignal::new());
-                    let teammate_idle = Arc::new(AtomicBool::new(false));
-
-                    let mut dispatch = tools::build_dispatch(&cwd_t);
-                    let extended = build_extended_dispatch(DispatchContext {
-                        config: AgentConfig {
-                            repo_root: cwd_t,
-                            tasks_dir: tasks_d_t.clone(),
-                            agent_name: name_t.clone(),
-                            llm_backend: backend_t,
-                        },
-                        services: Services {
-                            todo: todo_mgr_t,
-                            nag: nag_pol_t,
-                            skill_loader: sk_loader_t,
-                            task_manager: t_manager_t,
-                            bg: bg_mgr_t,
-                            message_bus: Arc::clone(&bus_t),
-                            teammate_manager: Arc::clone(&tm_mgr_t),
-                            request_tracker: req_tracker_t,
-                            event_bus: ev_bus_t,
-                            heartbeat_manager: hb_mgr_t,
-                            memory_store: mem_store_t,
-                            delivery_queue: del_queue_t,
-                        },
-                        compact_signal: teammate_compact,
-                        idle_signal: Arc::clone(&teammate_idle),
-                    });
-                    dispatch.extend(extended);
+                    let mut registry = tools::build_registry(&child_ctx.cwd);
+                    registry.extend(build_extended_registry(&child_ctx));
 
                     let system = format!(
                         "You are '{}', a teammate agent (role: {}). Your initial task:\n{}\n\n\
-                     When you finish your current work, call the `idle` tool to enter idle mode \
-                     and wait for new tasks or messages.",
-                        name_t, role_t, prompt_t
+                         When you finish your current work, call the `idle` tool to enter idle mode \
+                         and wait for new tasks or messages.",
+                        child_ctx.identity.name, child_ctx.identity.role, prompt
                     );
 
                     let mut messages = vec![serde_json::json!({
                         "role": "user",
-                        "content": prompt_t,
+                        "content": prompt,
                     })];
 
-                    let ctx = autonomy::LifecycleContext {
-                        teammate_manager: tm_mgr_t,
-                        message_bus: bus_t,
-                        tasks_dir: tasks_d_t,
-                        transcript_dir: transcript_d_t,
-                        agent_name: name_t,
-                        idle_signal: teammate_idle,
-                    };
-                    let config = autonomy::LifecycleConfig::default();
+                    let policy = autonomy::IdlePolicy::default();
                     autonomy::run_teammate_lifecycle(
                         llm_box.as_mut(),
                         &system,
                         &mut messages,
                         &tool_defs,
-                        &dispatch,
-                        &ctx,
-                        &config,
+                        &registry,
+                        &child_ctx,
+                        &policy,
                     );
                 });
 
-                result
+                Ok(result)
             }),
         );
     }
 
     // -- L9: shutdown_teammate
-    {
-        let tracker = Arc::clone(&request_tracker);
-        let bus = Arc::clone(&message_bus);
-        dispatch.insert(
-            "shutdown_teammate".into(),
-            Box::new(
-                move |input| match input.get("teammate").and_then(|v| v.as_str()) {
-                    Some(t) => tracker.handle_shutdown_request(&bus, t),
-                    None => "Error: missing 'teammate' field".into(),
-                },
-            ),
-        );
-    }
+    reg.register(
+        "shutdown_teammate",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let t = require_str(&input, "teammate")?;
+                Ok(ctx
+                    .services
+                    .request_tracker
+                    .handle_shutdown_request(&ctx.services.message_bus, t))
+            },
+        ),
+    );
 
     // -- L9: review_plan
-    {
-        let tracker = Arc::clone(&request_tracker);
-        let bus = Arc::clone(&message_bus);
-        dispatch.insert(
-            "review_plan".into(),
-            Box::new(move |input| {
-                let req_id = match input.get("request_id").and_then(|v| v.as_str()) {
-                    Some(r) => r,
-                    None => return "Error: missing 'request_id'".into(),
-                };
+    reg.register(
+        "review_plan",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let req_id = require_str(&input, "request_id")?;
                 let approve = input
                     .get("approve")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 let feedback = input.get("feedback").and_then(|v| v.as_str()).unwrap_or("");
-                tracker.handle_plan_review(&bus, req_id, approve, feedback)
-            }),
-        );
-    }
+                Ok(ctx.services.request_tracker.handle_plan_review(
+                    &ctx.services.message_bus,
+                    req_id,
+                    approve,
+                    feedback,
+                ))
+            },
+        ),
+    );
 
     // -- L11: worktree_create
-    {
-        let tm = Arc::clone(&task_manager);
-        let eb = Arc::clone(&event_bus);
-        let root = repo_root.clone();
-        dispatch.insert(
-            "worktree_create".into(),
-            Box::new(move |input| {
-                let name = match input.get("name").and_then(|v| v.as_str()) {
-                    Some(n) => n,
-                    None => return "Error: missing 'name'".into(),
-                };
+    reg.register(
+        "worktree_create",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let name = require_str(&input, "name")?;
                 let task_id = input.get("task_id").and_then(|v| v.as_i64());
-                let tm_guard = tm.write().expect("TaskManager write lock poisoned");
-                let wm = WorktreeManager::new(&root, &tm_guard, &eb);
-                match wm.create_with_task(name, task_id) {
-                    Ok(s) => s,
-                    Err(e) => format!("Error: {}", e),
-                }
-            }),
-        );
-    }
+                let tm_guard = ctx
+                    .services
+                    .task_manager
+                    .write()
+                    .expect("TaskManager write lock poisoned");
+                let wm = WorktreeManager::new(&ctx.cwd, &tm_guard, &ctx.services.event_bus);
+                wm.create_with_task(name, task_id).map_err(exec_err)
+            },
+        ),
+    );
 
     // -- L11: worktree_remove
-    {
-        let tm = Arc::clone(&task_manager);
-        let eb = Arc::clone(&event_bus);
-        let root = repo_root.clone();
-        dispatch.insert(
-            "worktree_remove".into(),
-            Box::new(move |input| {
-                let name = match input.get("name").and_then(|v| v.as_str()) {
-                    Some(n) => n,
-                    None => return "Error: missing 'name'".into(),
-                };
+    reg.register(
+        "worktree_remove",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let name = require_str(&input, "name")?;
                 let complete = input
                     .get("complete_task")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let tm_guard = tm.write().expect("TaskManager write lock poisoned");
-                let wm = WorktreeManager::new(&root, &tm_guard, &eb);
-                match wm.remove_with_options(name, complete) {
-                    Ok(s) => s,
-                    Err(e) => format!("Error: {}", e),
-                }
-            }),
-        );
-    }
+                let tm_guard = ctx
+                    .services
+                    .task_manager
+                    .write()
+                    .expect("TaskManager write lock poisoned");
+                let wm = WorktreeManager::new(&ctx.cwd, &tm_guard, &ctx.services.event_bus);
+                wm.remove_with_options(name, complete).map_err(exec_err)
+            },
+        ),
+    );
 
     // -- L11: list_events
-    {
-        let eb = Arc::clone(&event_bus);
-        dispatch.insert(
-            "list_events".into(),
-            Box::new(move |input| {
+    reg.register(
+        "list_events",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
                 let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-                eb.list_recent(limit)
-            }),
-        );
-    }
+                Ok(ctx.services.event_bus.list_recent(limit))
+            },
+        ),
+    );
 
     // -- L10: scan_tasks
-    {
-        let dir = tasks_dir.clone();
-        dispatch.insert(
-            "scan_tasks".into(),
-            Box::new(move |_| {
-                let tasks = autonomy::scan_unclaimed_tasks(&dir);
+    reg.register(
+        "scan_tasks",
+        Arc::new(
+            |ctx: &AgentContext, _input: serde_json::Value| -> HandlerResult {
+                let tasks = autonomy::scan_unclaimed_tasks(&ctx.tasks_dir);
                 if tasks.is_empty() {
-                    "No unclaimed tasks.".into()
+                    Ok("No unclaimed tasks.".into())
                 } else {
-                    serde_json::to_string_pretty(&tasks).unwrap_or_else(|_| "Error".into())
+                    Ok(serde_json::to_string_pretty(&tasks).unwrap_or_else(|_| "Error".into()))
                 }
-            }),
-        );
-    }
+            },
+        ),
+    );
 
     // -- L10: claim_task
-    {
-        let dir = tasks_dir.clone();
-        let name = agent_name.clone();
-        dispatch.insert(
-            "claim_task".into(),
-            Box::new(
-                move |input| match input.get("task_id").and_then(|v| v.as_i64()) {
-                    Some(id) => autonomy::claim_task(&dir, id, &name),
-                    None => "Error: missing 'task_id'".into(),
-                },
-            ),
-        );
-    }
+    reg.register(
+        "claim_task",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let id = require_i64(&input, "task_id")?;
+                Ok(autonomy::claim_task(&ctx.tasks_dir, id, &ctx.identity.name))
+            },
+        ),
+    );
 
     // -- L3: subagent
-    {
-        let backend = llm_backend;
-        let cwd = repo_root;
-        dispatch.insert(
-            "subagent".into(),
-            Box::new(move |input| {
-                let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
-                    Some(p) => p,
-                    None => return "Error: missing 'prompt'".into(),
-                };
-                let mut child_llm = create_llm(&backend);
+    reg.register(
+        "subagent",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let prompt = require_str(&input, "prompt")?;
+                let mut child_llm = create_llm(&ctx.llm_backend);
                 let child_tool_defs = child_tools();
-                let child_dispatch = tools::build_dispatch(&cwd);
-                SubagentFactory::spawn(
+                let child_registry = tools::build_registry(&ctx.cwd);
+                // Subagents only use core tools (no extended services), so a mock
+                // context is sufficient. This avoids sharing parent's live services.
+                let child_ctx = AgentContext::mock(&ctx.cwd);
+                Ok(SubagentFactory::spawn(
                     child_llm.as_mut(),
                     prompt,
                     child_tool_defs,
-                    &child_dispatch,
+                    &child_registry,
+                    &child_ctx,
                     10,
-                )
-            }),
-        );
-    }
+                ))
+            },
+        ),
+    );
 
     // -- GAP 5: save_memory
-    {
-        let ms = Arc::clone(&memory_store);
-        dispatch.insert(
-            "save_memory".into(),
-            Box::new(move |input| {
-                let text = match input.get("text").and_then(|v| v.as_str()) {
-                    Some(t) => t,
-                    None => return "Error: missing 'text' field".into(),
-                };
+    reg.register(
+        "save_memory",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let text = require_str(&input, "text")?;
                 let tags: Vec<String> = input
                     .get("tags")
                     .and_then(|v| v.as_array())
@@ -767,96 +513,89 @@ pub fn build_extended_dispatch(ctx: DispatchContext) -> Dispatch {
                             .collect()
                     })
                     .unwrap_or_default();
-                ms.save_memory(text, &tags)
-            }),
-        );
-    }
+                Ok(ctx.services.memory_store.save_memory(text, &tags))
+            },
+        ),
+    );
 
     // -- GAP 8: enqueue_delivery
-    {
-        let dq = Arc::clone(&delivery_queue);
-        dispatch.insert(
-            "enqueue_delivery".into(),
-            Box::new(move |input| {
-                let channel = match input.get("channel").and_then(|v| v.as_str()) {
-                    Some(c) => c,
-                    None => return "Error: missing 'channel' field".into(),
-                };
-                let peer_id = match input.get("peer_id").and_then(|v| v.as_str()) {
-                    Some(p) => p,
-                    None => return "Error: missing 'peer_id' field".into(),
-                };
-                let payload = match input.get("payload").and_then(|v| v.as_str()) {
-                    Some(p) => p,
-                    None => return "Error: missing 'payload' field".into(),
-                };
+    reg.register(
+        "enqueue_delivery",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let channel = require_str(&input, "channel")?;
+                let peer_id = require_str(&input, "peer_id")?;
+                let payload = require_str(&input, "payload")?;
                 let max_attempts = input
                     .get("max_attempts")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(5) as u32;
-                match delivery::enqueue_delivery(&dq, channel, peer_id, payload, max_attempts) {
-                    Ok(id) => format!("Delivery enqueued: {}", id),
-                    Err(e) => format!("Error: {}", e),
-                }
-            }),
-        );
-    }
+                let id = delivery::enqueue_delivery(
+                    &ctx.services.delivery_queue,
+                    channel,
+                    peer_id,
+                    payload,
+                    max_attempts,
+                )
+                .map_err(exec_err)?;
+                Ok(format!("Delivery enqueued: {}", id))
+            },
+        ),
+    );
 
     // -- compact tool handler
-    {
-        let signal = compact_signal;
-        dispatch.insert("compact".into(), Box::new(move |_| {
-            signal.request();
-            "Compaction requested. The conversation will be compacted after this tool call completes.".into()
-        }));
-    }
+    reg.register(
+        "compact",
+        Arc::new(|ctx: &AgentContext, _input: serde_json::Value| -> HandlerResult {
+            ctx.signals.compact.request();
+            Ok("Compaction requested. The conversation will be compacted after this tool call completes.".into())
+        }),
+    );
 
     // -- idle tool handler
-    {
-        let signal = idle_signal;
-        dispatch.insert(
-            "idle".into(),
-            Box::new(move |_| {
-                signal.store(true, Ordering::Release);
-                "Transitioning to idle phase. You will be woken when new work arrives.".into()
-            }),
-        );
-    }
+    reg.register(
+        "idle",
+        Arc::new(
+            |ctx: &AgentContext, _input: serde_json::Value| -> HandlerResult {
+                ctx.signals.idle.store(true, Ordering::Release);
+                Ok("Transitioning to idle phase. You will be woken when new work arrives.".into())
+            },
+        ),
+    );
 
     // -- cron_add
-    {
-        let hb = Arc::clone(&heartbeat_manager);
-        dispatch.insert(
-            "cron_add".into(),
-            Box::new(move |input| {
-                let name = match input.get("name").and_then(|v| v.as_str()) {
-                    Some(n) => n,
-                    None => return "Error: missing 'name'".into(),
-                };
-                let cron = match input.get("cron").and_then(|v| v.as_str()) {
-                    Some(c) => c,
-                    None => return "Error: missing 'cron'".into(),
-                };
-                let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
-                    Some(p) => p,
-                    None => return "Error: missing 'prompt'".into(),
-                };
-                hb.add_cron(name, cron, prompt)
-            }),
-        );
-    }
+    reg.register(
+        "cron_add",
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let name = require_str(&input, "name")?;
+                let cron = require_str(&input, "cron")?;
+                let prompt = require_str(&input, "prompt")?;
+                Ok(ctx.services.heartbeat_manager.add_cron(name, cron, prompt))
+            },
+        ),
+    );
 
     // -- cron_remove
-    dispatch_str_direct!(
-        dispatch,
+    reg.register(
         "cron_remove",
-        "name",
-        heartbeat_manager,
-        remove_cron
+        Arc::new(
+            |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
+                let name = require_str(&input, "name")?;
+                Ok(ctx.services.heartbeat_manager.remove_cron(name))
+            },
+        ),
     );
 
     // -- cron_list
-    dispatch_noarg_direct!(dispatch, "cron_list", heartbeat_manager, list_crons);
+    reg.register(
+        "cron_list",
+        Arc::new(
+            |ctx: &AgentContext, _input: serde_json::Value| -> HandlerResult {
+                Ok(ctx.services.heartbeat_manager.list_crons())
+            },
+        ),
+    );
 
-    dispatch
+    reg
 }

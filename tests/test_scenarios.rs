@@ -7,15 +7,15 @@ use nano_agent::autonomy;
 use nano_agent::concurrency::BackgroundManager;
 use nano_agent::core_loop::{run_agent_loop, PathSandbox};
 use nano_agent::delegation::SubagentFactory;
+use nano_agent::handler::{AgentContext, HandlerRegistry};
 use nano_agent::isolation::{EventBus, WorktreeManager};
 use nano_agent::knowledge::SkillLoader;
 use nano_agent::memory;
-use nano_agent::mock::{make_dispatch, make_text_block, make_tool_use_block, MockLLM};
+use nano_agent::mock::{make_registry, make_text_block, make_tool_use_block, MockLLM};
 use nano_agent::planning::{NagPolicy, TodoItem, TodoManager};
 use nano_agent::protocols::RequestTracker;
 use nano_agent::tasks::{Task, TaskManager};
 use nano_agent::teams::{MessageBus, TeammateManager};
-use nano_agent::types::LoopSignals;
 use nano_agent::types::*;
 
 use std::collections::HashMap;
@@ -26,16 +26,16 @@ fn tmp() -> TempDir {
     TempDir::new().unwrap()
 }
 
-fn empty_dispatch() -> Dispatch {
-    make_dispatch(HashMap::new())
+fn empty_registry() -> HandlerRegistry {
+    HandlerRegistry::new()
 }
 
-fn echo_dispatch() -> Dispatch {
+fn echo_registry() -> HandlerRegistry {
     let mut h = HashMap::new();
     h.insert("bash".to_string(), "ok".to_string());
     h.insert("read_file".to_string(), "file contents here".to_string());
     h.insert("write_file".to_string(), "written".to_string());
-    make_dispatch(h)
+    make_registry(h)
 }
 
 // ---------------------------------------------------------------------------
@@ -64,7 +64,7 @@ fn scenario_01_loop_with_planning_nag() {
     }
     llm.queue("end_turn", vec![make_text_block("done")]);
 
-    let dispatch = echo_dispatch();
+    let registry = echo_registry();
     let tools: Vec<serde_json::Value> = vec![];
     let mut messages: Vec<serde_json::Value> =
         vec![serde_json::json!({"role": "user", "content": "implement feature X"})];
@@ -85,14 +85,9 @@ fn scenario_01_loop_with_planning_nag() {
     );
 
     // Run agent loop
-    let calls = run_agent_loop(
-        &mut llm,
-        "system",
-        &mut messages,
-        &tools,
-        &dispatch,
-        &LoopSignals::none(),
-    );
+    let tmp_s01 = tmp();
+    let ctx = AgentContext::mock(tmp_s01.path());
+    let calls = run_agent_loop(&mut llm, "system", &mut messages, &tools, &registry, &ctx);
     assert_eq!(calls, 4);
 
     // Verify todo manager rejects bad states
@@ -163,13 +158,16 @@ fn scenario_02_delegation_with_tool_use() {
     let tools = nano_agent::delegation::child_tools();
     let mut h = HashMap::new();
     h.insert("read_file".to_string(), "secret=42".to_string());
-    let dispatch = make_dispatch(h);
+    let registry = make_registry(h);
+    let tmp_s02 = tmp();
+    let ctx = AgentContext::mock(tmp_s02.path());
 
     let result = SubagentFactory::spawn(
         &mut child_llm,
         "Read data.txt and summarize",
         &tools,
-        &dispatch,
+        &registry,
+        &ctx,
         5,
     );
 
@@ -548,12 +546,15 @@ fn scenario_08_team_delegation() {
     );
 
     let tools = nano_agent::delegation::child_tools();
-    let dispatch = empty_dispatch();
+    let registry = empty_registry();
+    let tmp_s08 = tmp();
+    let ctx_s08 = AgentContext::mock(tmp_s08.path());
     let result = SubagentFactory::spawn(
         &mut child_llm,
         "Analyze data.csv and summarize",
         &tools,
-        &dispatch,
+        &registry,
+        &ctx_s08,
         3,
     );
     assert!(result.contains("Analysis complete"));
@@ -911,8 +912,17 @@ fn scenario_14_skill_informed_delegation() {
     );
 
     let tools = nano_agent::delegation::child_tools();
-    let dispatch = empty_dispatch();
-    let result = SubagentFactory::spawn(&mut child_llm, "Deploy v2.1.0", &tools, &dispatch, 3);
+    let registry = empty_registry();
+    let tmp_s14 = tmp();
+    let ctx_s14 = AgentContext::mock(tmp_s14.path());
+    let result = SubagentFactory::spawn(
+        &mut child_llm,
+        "Deploy v2.1.0",
+        &tools,
+        &registry,
+        &ctx_s14,
+        3,
+    );
 
     assert!(result.contains("Deployment complete"));
 }
@@ -1182,7 +1192,9 @@ fn scenario_19_full_session_simulation() {
         )],
     );
 
-    let dispatch = echo_dispatch();
+    let registry = echo_registry();
+    let tmp_s19 = tmp();
+    let ctx = AgentContext::mock(tmp_s19.path());
     let tools: Vec<serde_json::Value> = vec![];
     let mut messages: Vec<serde_json::Value> =
         vec![serde_json::json!({"role": "user", "content": "Process config and create output"})];
@@ -1192,8 +1204,8 @@ fn scenario_19_full_session_simulation() {
         "You are a helper.",
         &mut messages,
         &tools,
-        &dispatch,
-        &LoopSignals::none(),
+        &registry,
+        &ctx,
     );
 
     // Should have made 4 LLM calls (3 tool_use + 1 end_turn)
@@ -1331,15 +1343,17 @@ fn scenario_21_resilience_retry_then_succeed() {
     let mut messages: Vec<serde_json::Value> =
         vec![serde_json::json!({"role": "user", "content": "hello"})];
     let tools: Vec<serde_json::Value> = vec![];
-    let dispatch = empty_dispatch();
+    let registry = empty_registry();
+    let tmp_s21 = tmp();
+    let ctx = AgentContext::mock(tmp_s21.path());
 
     let calls = run_agent_loop(
         resilient.as_mut(),
         "system",
         &mut messages,
         &tools,
-        &dispatch,
-        &LoopSignals::none(),
+        &registry,
+        &ctx,
     );
 
     // Loop should complete successfully (1 LLM call from the loop's perspective)
@@ -1382,28 +1396,21 @@ fn scenario_22_overflow_triggers_compaction() {
         AuthProfile::empty(),
     ));
 
-    let compact_signal = CompactSignal::new();
-    let signals = LoopSignals {
-        compact_signal: Some(&compact_signal),
-        transcript_dir: None,
-        idle_signal: None,
-        tool_callback: None,
-        interrupt_signal: None,
-        projector: None,
-    };
+    let tmp_s22 = tmp();
+    let ctx = AgentContext::mock(tmp_s22.path());
 
     let mut messages: Vec<serde_json::Value> =
         vec![serde_json::json!({"role": "user", "content": "process a very long context"})];
     let tools: Vec<serde_json::Value> = vec![];
-    let dispatch = empty_dispatch();
+    let registry = empty_registry();
 
     let calls = run_agent_loop(
         resilient.as_mut(),
         "system",
         &mut messages,
         &tools,
-        &dispatch,
-        &signals,
+        &registry,
+        &ctx,
     );
 
     // 1 counted LLM call: overflow doesn't increment call_count (it `continue`s),
@@ -1452,15 +1459,17 @@ fn scenario_23_fatal_error_stops_loop() {
     let mut messages: Vec<serde_json::Value> =
         vec![serde_json::json!({"role": "user", "content": "hello"})];
     let tools: Vec<serde_json::Value> = vec![];
-    let dispatch = empty_dispatch();
+    let registry = empty_registry();
+    let tmp_s23 = tmp();
+    let ctx = AgentContext::mock(tmp_s23.path());
 
     let calls = run_agent_loop(
         resilient.as_mut(),
         "system",
         &mut messages,
         &tools,
-        &dispatch,
-        &LoopSignals::none(),
+        &registry,
+        &ctx,
     );
 
     // Fatal errors break before incrementing call_count
@@ -1786,13 +1795,16 @@ fn scenario_29_resilient_subagent_delegation() {
     let tools = nano_agent::delegation::child_tools();
     let mut h = HashMap::new();
     h.insert("read_file".to_string(), "important data".to_string());
-    let dispatch = make_dispatch(h);
+    let registry = make_registry(h);
+    let tmp_s29 = tmp();
+    let ctx = AgentContext::mock(tmp_s29.path());
 
     let result = SubagentFactory::spawn(
         &mut resilient,
         "Read data.txt and summarize",
         &tools,
-        &dispatch,
+        &registry,
+        &ctx,
         5,
     );
 
@@ -1907,15 +1919,17 @@ fn scenario_30_full_new_features_integration() {
     }
 
     let tools: Vec<serde_json::Value> = vec![];
-    let dispatch = empty_dispatch();
+    let registry = empty_registry();
+    let tmp_s30 = tmp();
+    let ctx = AgentContext::mock(tmp_s30.path());
 
     let calls = run_agent_loop(
         resilient.as_mut(),
         &system,
         &mut messages,
         &tools,
-        &dispatch,
-        &LoopSignals::none(),
+        &registry,
+        &ctx,
     );
 
     assert_eq!(calls, 1);

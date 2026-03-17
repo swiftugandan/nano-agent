@@ -1,5 +1,7 @@
+use crate::handler::{AgentContext, HandlerRegistry, HandlerResult};
 use crate::types::*;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 /// Mock LLM that returns pre-queued responses. Mirrors Python conftest.py MockLLM.
 pub struct MockLLM {
@@ -81,13 +83,20 @@ impl Llm for MockLLM {
 // Test helpers
 // ---------------------------------------------------------------------------
 
-/// Create a dispatch map from {name: return_value} pairs.
-pub fn make_dispatch(handlers: std::collections::HashMap<String, String>) -> Dispatch {
-    let mut dispatch: Dispatch = std::collections::HashMap::new();
+/// Create a handler registry from {name: return_value} pairs.
+pub fn make_registry(handlers: std::collections::HashMap<String, String>) -> HandlerRegistry {
+    let mut reg = HandlerRegistry::new();
     for (name, val) in handlers {
-        dispatch.insert(name, Box::new(move |_input| val.clone()));
+        reg.register(
+            name,
+            Arc::new(
+                move |_ctx: &AgentContext, _input: serde_json::Value| -> HandlerResult {
+                    Ok(val.clone())
+                },
+            ),
+        );
     }
-    dispatch
+    reg
 }
 
 /// Create a text content block.

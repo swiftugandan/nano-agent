@@ -9,6 +9,7 @@ pub mod delegation;
 pub mod delivery;
 pub mod dispatch;
 pub mod gateway;
+pub mod handler;
 pub mod heartbeat;
 pub mod isolation;
 pub mod knowledge;

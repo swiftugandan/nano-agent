@@ -9,9 +9,9 @@ Any language implementation that satisfies these interfaces and passes the contr
 ## The Invariant Core
 
 ```pseudocode
-function agent_loop(system_prompt, messages, tools, dispatch):
+function agent_loop(ctx: &AgentContext, messages: list, tools: list, registry: HandlerRegistry):
     while true:
-        response = LLM.call(system_prompt, messages, tools)
+        response = LLM.call(ctx.config.llm_backend, messages, tools)
         messages.append(assistant_turn(response))
 
         if response.stop_reason != "tool_use":
@@ -20,9 +20,9 @@ function agent_loop(system_prompt, messages, tools, dispatch):
         results = []
         for tool_call in response.tool_calls:
             if tool_call.name in dispatch:
-                result = dispatch[tool_call.name](tool_call.input)
+                result = dispatch[tool_call.name].call(ctx, tool_call.input)
             else:
-                result = "Unknown tool: {tool_call.name}"
+                result = Err(HandlerError::Validation("Unknown tool: {tool_call.name}"))
             results.append(tool_result(tool_call.id, result))
 
         messages.append(user_turn(results))
@@ -34,11 +34,149 @@ function agent_loop(system_prompt, messages, tools, dispatch):
 
 | # | Extension Point | Location in Loop | Description |
 |---|----------------|-----------------|-------------|
-| 1 | **Tool Map Extension** | `dispatch` map | Add new tool name → handler entries |
+| 1 | **Tool Map Extension** | `dispatch` map | Add new tool name → `Handler` entries |
 | 2 | **Pre-LLM Injection** | Before `LLM.call()` | Modify messages (nag reminders, bg results, inbox drain) |
 | 3 | **Post-Tool Interception** | After tool execution | Process results before appending (compact, shutdown) |
 | 4 | **System Prompt Composition** | Build `system_prompt` | Compose from components (skill descriptions, identity) |
 | 5 | **Lifecycle Wrapping** | Around `agent_loop()` | Wrap in work/idle cycles, worktree scoping |
+
+---
+
+## Foundation: Handler & Middleware Types
+
+These abstractions replace the old `ToolHandler = function(input) -> string` pattern and provide the building blocks for tool dispatch, middleware composition, and error handling across all layers.
+
+### Handler
+
+```pseudocode
+trait Handler:
+    function call(ctx: &AgentContext, input: Value) -> HandlerResult
+```
+
+### HandlerResult
+
+```pseudocode
+type HandlerResult = Result<string, HandlerError>
+```
+
+### HandlerError
+
+```pseudocode
+enum HandlerError:
+    Validation { message: string }      # bad input, do not retry
+    Execution  { message: string }      # tool failed, may retry
+    Timeout    { elapsed_ms: int }      # wall-clock limit exceeded
+```
+
+### Middle
+
+A function that wraps a `Handler`, returning a new `Handler`. Middleware is applied outside-in: the first middleware added is the outermost wrapper.
+
+```pseudocode
+type Middle = function(next: Handler) -> Handler
+```
+
+### Chain
+
+Composes a base handler with N middleware layers into a single `Handler`.
+
+```pseudocode
+interface Chain:
+    function new(base: Handler) -> Chain
+    function with(middle: Middle) -> Chain
+    function build() -> Handler
+        # Folds middleware around base: mid_N(mid_N-1(...mid_1(base)))
+```
+
+---
+
+## Foundation: AgentContext
+
+Unifies identity, configuration, services, signals, and paths into a single struct passed through the entire call chain. Replaces the former `DispatchContext`, `Services`, and `LoopSignals` types.
+
+```pseudocode
+type AgentContext:
+    # Identity
+    agent_id: string
+    agent_name: string
+    agent_role: string
+    session_id: string
+
+    # Config
+    config: AgentConfig         # repo_root, tasks_dir, llm_backend, ...
+
+    # Services (all manager instances)
+    todo: TodoManager
+    tasks: TaskManager
+    memory: MemoryStore
+    skills: SkillLoader
+    teams: TeammateManager
+    background: BackgroundManager
+    bus: MessageBus
+    channels: ChannelManager
+    heartbeat: HeartbeatManager
+    worktrees: WorktreeManager
+    events: EventBus
+    delivery: DeliveryQueue
+    sessions: SessionStore
+    requests: RequestTracker
+
+    # Signals
+    compact: bool               # request context compaction
+    idle: bool                  # enter idle/polling mode
+    interrupt: bool             # graceful shutdown requested
+
+    # Paths
+    transcript_dir: path
+    cwd: path
+
+    # Extensions (implementation-specific)
+    projector: optional<Projector>       # demand-paging write gate for large content
+    tool_callback: optional<fn(ToolEvent)>  # UI callback for tool start/complete/error events
+```
+
+---
+
+## Foundation: Tool Middleware
+
+Standard middleware factories that can be composed onto any `Handler` via `Chain`.
+
+### with_output_cap
+
+```pseudocode
+function with_output_cap(max_bytes: int) -> Middle
+    # Truncates successful output to max_bytes
+    # Appends "[truncated]" marker when truncation occurs
+```
+
+### with_timeout
+
+```pseudocode
+function with_timeout(duration_ms: int) -> Middle
+    # Wraps handler execution in a deadline
+    # Returns HandlerError::Timeout if duration exceeded
+```
+
+### with_retry
+
+```pseudocode
+function with_retry(max_attempts: int) -> Middle
+    # Retries on HandlerError::Execution up to max_attempts
+    # Passes through Validation and Timeout immediately
+```
+
+### Composition Example
+
+```pseudocode
+bash_tool = Chain(BashHandler)
+    .with(with_output_cap(50_000))
+    .with(with_timeout(120_000))
+    .build()
+
+file_read_tool = Chain(FileReadHandler)
+    .with(with_output_cap(100_000))
+    .build()
+```
 
 ---
 
@@ -48,7 +186,7 @@ function agent_loop(system_prompt, messages, tools, dispatch):
 
 ```pseudocode
 interface AgentLoop:
-    function run(system: string, messages: list, tools: list, dispatch: map) -> list
+    function run(ctx: &AgentContext, messages: list, tools: list, registry: HandlerRegistry) -> list
         # Calls LLM in a loop until stop_reason != "tool_use"
         # Returns final messages list
         # Each tool_result MUST carry the tool_use_id of the call it answers
@@ -58,11 +196,12 @@ interface AgentLoop:
 
 ```pseudocode
 interface ToolDispatcher:
-    dispatch: map<string, function(input: map) -> string>
+    dispatch: map<string, Handler>
 
-    function route(tool_name: string, input: map) -> string
-        # If tool_name in dispatch: return dispatch[tool_name](input)
-        # Else: return error string (MUST NOT throw)
+    function route(ctx: &AgentContext, tool_name: string, input: Value) -> HandlerResult
+        # If tool_name in dispatch: return dispatch[tool_name].call(ctx, input)
+        # Else: return Err(HandlerError::Validation("Unknown tool: {tool_name}"))
+        # MUST NOT throw/panic
 ```
 
 ### PathSandbox
@@ -130,9 +269,10 @@ interface NagPolicy:
 
 ```pseudocode
 interface SubagentFactory:
-    function spawn(prompt: string, tools: list, dispatch: map, max_iterations: int) -> string
+    function spawn(ctx: &AgentContext, prompt: string, tools: list, registry: HandlerRegistry, max_iterations: int) -> string
+        # Creates child AgentContext derived from ctx (new agent_id, shared services)
         # Creates fresh messages = [user_turn(prompt)]
-        # Runs agent loop with given tools/dispatch up to max_iterations
+        # Runs agent loop with child ctx and given tools/dispatch up to max_iterations
         # MUST NOT include recursive spawn tool in child's tool set
         # Returns only final text (no tool_use/tool_result content)
         # Parent messages grow by exactly 2 (the tool_use + tool_result)
@@ -379,9 +519,10 @@ interface MessageBus:
 
 ```pseudocode
 interface TeammateManager:
-    function spawn(name: string, role: string, prompt: string) -> string
+    function spawn(ctx: &AgentContext, name: string, role: string, prompt: string) -> string
+        # Creates child AgentContext from ctx (new agent_id/name/role, shared services)
         # Creates teammate with status="working"
-        # Runs agent loop in separate thread
+        # Runs agent loop with child ctx in separate thread
         # Teammate starts with fresh messages [user(prompt)]
         # Returns confirmation string
 
@@ -844,13 +985,14 @@ interface BackgroundManager:
     all_tasks: map<string, TaskInfo>
     notification_queue: list        # thread-safe
 
-    function run_in_lane(lane: string, command: string) -> string
+    function run_in_lane(ctx: &AgentContext, lane: string, command: string) -> string
         # Primary method: submit to named lane
+        # Can access ctx.services for service-aware background tasks
         # Returns immediately with task_id
         # Lane enforces max_concurrency; excess tasks queue
 
-    function run(command: string) -> string
-        # Backwards-compatible: run_in_lane("background", command)
+    function run(ctx: &AgentContext, command: string) -> string
+        # Backwards-compatible: run_in_lane(ctx, "background", command)
 
     function check(task_id: string) -> string
     function drain_notifications() -> list
@@ -867,14 +1009,19 @@ interface BackgroundManager:
 ## Dependency Graph
 
 ```
-L1  Core Loop         (foundation — no dependencies)
+Foundation:
+    Handler/Middle    type system for tool dispatch and middleware composition
+    AgentContext      unified state struct (replaces DispatchContext, Services, LoopSignals)
+    Tool Middleware   with_output_cap, with_timeout, with_retry
+
+L1  Core Loop         → Foundation (AgentContext, Handler)
 L2  Planning          → L1
-L3  Delegation        → L1
+L3  Delegation        → L1, Foundation (spawns child AgentContext)
 L4  Knowledge         → L1
 L5  Memory            → L1
 L6  Tasks             → L1
-L7  Concurrency       → L1 (named lanes: main, cron, background)
-L8  Teams             → L1, L7
+L7  Concurrency       → L1, Foundation (ctx-aware lane execution)
+L8  Teams             → L1, L7, Foundation (propagates AgentContext to children)
 L9  Protocols         → L8
 L10 Autonomy          → L6, L8, L9
 L11 Isolation         → L6, L10
@@ -887,4 +1034,4 @@ Cross-cutting:
     Reliable Delivery guarantees outbound message delivery via write-ahead queue
 ```
 
-Each layer ONLY extends the core loop through the 5 extension points — it never modifies the loop itself.
+Each layer ONLY extends the core loop through the 5 extension points — it never modifies the loop itself. The Foundation types (Handler, AgentContext, middleware) provide the structural backbone that all layers build on.

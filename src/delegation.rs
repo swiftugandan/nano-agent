@@ -1,3 +1,4 @@
+use crate::handler::{AgentContext, HandlerRegistry};
 use crate::tools::tool_definitions;
 use crate::types::*;
 use std::sync::OnceLock;
@@ -25,13 +26,22 @@ pub struct SubagentFactory;
 
 impl SubagentFactory {
     /// Spawn a subagent with fresh context. Returns only the final text.
+    /// Creates a child AgentContext derived from the parent (new agent_id, shared services).
     pub fn spawn(
         llm: &mut dyn Llm,
         prompt: &str,
         tools: &[serde_json::Value],
-        dispatch: &Dispatch,
+        registry: &HandlerRegistry,
+        ctx: &AgentContext,
         max_iterations: usize,
     ) -> String {
+        // Create isolated child context with new agent_id and fresh signals
+        let child_ctx = ctx.child_context(
+            format!("subagent-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            "subagent".to_string(),
+            None,
+        );
+
         let mut sub_messages: Vec<serde_json::Value> = vec![serde_json::json!({
             "role": "user",
             "content": prompt,
@@ -77,10 +87,9 @@ impl SubagentFactory {
             let mut results: Vec<serde_json::Value> = Vec::new();
             for block in &response.content {
                 if let ContentBlock::ToolUse { id, name, input } = block {
-                    let handler = dispatch.get(name.as_str());
-                    let output = match handler {
-                        Some(h) => h(input.clone()),
-                        None => format!("Unknown tool: {}", name),
+                    let output = match registry.route(&child_ctx, name, input.clone()) {
+                        Ok(s) => s,
+                        Err(e) => format!("Error: {}", e),
                     };
                     results.push(serde_json::json!({
                         "type": "tool_result",

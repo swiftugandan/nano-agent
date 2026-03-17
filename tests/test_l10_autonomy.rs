@@ -120,7 +120,7 @@ fn test_l10_05_identity_reinjection_after_compression() {
     assert!(should_inject(&messages));
 
     let identity = make_identity_block("alice", "coder", "alpha");
-    let ack = serde_json::json!({"role": "assistant", "content": "I am alice. Continuing."});
+    let ack = make_acknowledgment("alice");
     messages.insert(0, identity);
     messages.insert(1, ack);
 

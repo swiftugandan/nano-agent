@@ -1,16 +1,20 @@
 use nano_agent::delegation::*;
+use nano_agent::handler::{AgentContext, HandlerRegistry, HandlerResult};
 use nano_agent::mock::*;
 use nano_agent::types::*;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[test]
 fn test_l3_01_subagent_starts_with_fresh_messages() {
     let mut llm = MockLLM::new();
     llm.queue("end_turn", vec![make_text_block("Subagent done.")]);
 
-    let dispatch: Dispatch = HashMap::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = HandlerRegistry::new();
+    let ctx = AgentContext::mock(tmp.path());
     let tools = child_tools();
-    let result = SubagentFactory::spawn(&mut llm, "Do something", &tools, &dispatch, 30);
+    let result = SubagentFactory::spawn(&mut llm, "Do something", &tools, &registry, &ctx, 30);
 
     assert_eq!(result, "Subagent done.");
     assert_eq!(llm.call_count(), 1);
@@ -29,11 +33,20 @@ fn test_l3_02_returns_only_final_text() {
     );
     llm.queue("end_turn", vec![make_text_block("Final summary.")]);
 
-    let mut dispatch: Dispatch = HashMap::new();
-    dispatch.insert("bash".to_string(), Box::new(|_| "hi".to_string()));
+    let tmp = tempfile::tempdir().unwrap();
+    let mut registry = HandlerRegistry::new();
+    registry.register(
+        "bash",
+        Arc::new(
+            |_ctx: &AgentContext, _input: serde_json::Value| -> HandlerResult {
+                Ok("hi".to_string())
+            },
+        ),
+    );
+    let ctx = AgentContext::mock(tmp.path());
 
     let tools = child_tools();
-    let result = SubagentFactory::spawn(&mut llm, "Test", &tools, &dispatch, 30);
+    let result = SubagentFactory::spawn(&mut llm, "Test", &tools, &registry, &ctx, 30);
 
     assert_eq!(result, "Final summary.");
     assert!(!result.contains("tool_use"));
@@ -81,11 +94,27 @@ fn test_l3_05_respects_iteration_limit() {
         );
     }
 
-    let mut dispatch: Dispatch = HashMap::new();
-    dispatch.insert("bash".to_string(), Box::new(|_| "echoed".to_string()));
+    let tmp = tempfile::tempdir().unwrap();
+    let mut registry = HandlerRegistry::new();
+    registry.register(
+        "bash",
+        Arc::new(
+            |_ctx: &AgentContext, _input: serde_json::Value| -> HandlerResult {
+                Ok("echoed".to_string())
+            },
+        ),
+    );
+    let ctx = AgentContext::mock(tmp.path());
 
     let tools = child_tools();
-    SubagentFactory::spawn(&mut llm, "Infinite loop", &tools, &dispatch, max_iterations);
+    SubagentFactory::spawn(
+        &mut llm,
+        "Infinite loop",
+        &tools,
+        &registry,
+        &ctx,
+        max_iterations,
+    );
 
     assert!(llm.call_count() <= max_iterations);
 }

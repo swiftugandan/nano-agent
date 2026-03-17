@@ -1,10 +1,12 @@
 use crate::core_loop::PathSandbox;
-use crate::types::Dispatch;
-use std::collections::HashMap;
+use crate::handler::{
+    exec_err, require_str, with_output_cap, AgentContext, Chain, Handler, HandlerError,
+    HandlerRegistry, HandlerResult,
+};
 use std::io::Read as IoRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -187,18 +189,6 @@ const BLOCKED_COMMANDS: &[&str] = &[
     "fork bomb",
 ];
 
-const MAX_OUTPUT_BYTES: usize = 50 * 1024; // 50KB
-
-fn truncate_output(s: String) -> String {
-    if s.len() > MAX_OUTPUT_BYTES {
-        let mut truncated = crate::util::truncate_at_boundary(&s, MAX_OUTPUT_BYTES).to_string();
-        truncated.push_str("\n... (output truncated)");
-        truncated
-    } else {
-        s
-    }
-}
-
 fn format_command_output(stdout: &str, stderr: &str, exit_code: Option<i32>) -> String {
     let mut result = String::new();
     if !stdout.is_empty() {
@@ -223,7 +213,7 @@ fn resolve_path(
     workspace: &Path,
 ) -> Result<PathBuf, String> {
     match input.get("path").and_then(|v| v.as_str()) {
-        Some(p) => sandbox.safe_path(p).map_err(|e| format!("Error: {}", e)),
+        Some(p) => sandbox.safe_path(p).map_err(|e| format!("{}", e)),
         None => Ok(workspace.to_path_buf()),
     }
 }
@@ -237,356 +227,391 @@ fn format_external_output(output: Output, empty_msg: &str) -> String {
     if stdout.is_empty() {
         return empty_msg.to_string();
     }
-    truncate_output(stdout.into_owned())
+    stdout.into_owned()
 }
 
-/// Build a dispatch table with real tool handlers rooted at the given workspace.
-pub fn build_dispatch(workspace: &Path) -> Dispatch {
-    let mut dispatch: Dispatch = HashMap::new();
+// ---------------------------------------------------------------------------
+// Handler structs for the 7 core tools
+// ---------------------------------------------------------------------------
 
-    // bash
-    let ws = workspace.to_path_buf();
-    dispatch.insert(
-        "bash".to_string(),
-        Box::new(move |input| {
-            let cmd = match input.get("command").and_then(|v| v.as_str()) {
-                Some(c) => c,
-                None => return "Error: missing 'command' field".to_string(),
-            };
+pub struct BashHandler {
+    pub workspace: PathBuf,
+}
 
-            for blocked in BLOCKED_COMMANDS {
-                if cmd.contains(blocked) {
-                    return format!("Error: command blocked for safety: {}", blocked);
-                }
+impl Handler for BashHandler {
+    fn call(&self, _ctx: &AgentContext, input: serde_json::Value) -> HandlerResult {
+        let cmd = require_str(&input, "command")?;
+
+        for blocked in BLOCKED_COMMANDS {
+            if cmd.contains(blocked) {
+                return Err(HandlerError::Validation {
+                    message: format!("command blocked for safety: {}", blocked),
+                });
             }
+        }
 
-            let timeout_secs = input.get("timeout").and_then(|v| v.as_f64());
+        let timeout_secs = input.get("timeout").and_then(|v| v.as_f64());
 
-            let mut child = match Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
-                .current_dir(&ws)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(e) => return format!("Error spawning command: {}", e),
-            };
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(&self.workspace)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| HandlerError::Execution {
+                message: format!("Error spawning command: {}", e),
+            })?;
 
-            match timeout_secs {
-                Some(secs) => {
-                    let deadline = Instant::now() + Duration::from_secs_f64(secs);
+        match timeout_secs {
+            Some(secs) => {
+                let deadline = Instant::now() + Duration::from_secs_f64(secs);
 
-                    let stdout_pipe = child.stdout.take();
-                    let stderr_pipe = child.stderr.take();
+                let stdout_pipe = child.stdout.take();
+                let stderr_pipe = child.stderr.take();
 
-                    let stdout_handle = thread::spawn(move || {
-                        let mut buf = Vec::new();
-                        if let Some(mut pipe) = stdout_pipe {
-                            let _ = pipe.read_to_end(&mut buf);
+                let stdout_handle = thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    if let Some(mut pipe) = stdout_pipe {
+                        let _ = pipe.read_to_end(&mut buf);
+                    }
+                    buf
+                });
+
+                let stderr_handle = thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    if let Some(mut pipe) = stderr_pipe {
+                        let _ = pipe.read_to_end(&mut buf);
+                    }
+                    buf
+                });
+
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            let stdout_data = stdout_handle.join().unwrap_or_default();
+                            let stderr_data = stderr_handle.join().unwrap_or_default();
+                            let stdout = String::from_utf8_lossy(&stdout_data);
+                            let stderr = String::from_utf8_lossy(&stderr_data);
+                            return Ok(format_command_output(&stdout, &stderr, status.code()));
                         }
-                        buf
-                    });
-
-                    let stderr_handle = thread::spawn(move || {
-                        let mut buf = Vec::new();
-                        if let Some(mut pipe) = stderr_pipe {
-                            let _ = pipe.read_to_end(&mut buf);
-                        }
-                        buf
-                    });
-
-                    // Poll for exit or timeout
-                    loop {
-                        match child.try_wait() {
-                            Ok(Some(status)) => {
+                        Ok(None) => {
+                            if Instant::now() >= deadline {
+                                let _ = child.kill();
+                                let _ = child.wait();
                                 let stdout_data = stdout_handle.join().unwrap_or_default();
                                 let stderr_data = stderr_handle.join().unwrap_or_default();
                                 let stdout = String::from_utf8_lossy(&stdout_data);
                                 let stderr = String::from_utf8_lossy(&stderr_data);
-                                return format_command_output(&stdout, &stderr, status.code());
-                            }
-                            Ok(None) => {
-                                if Instant::now() >= deadline {
-                                    let _ = child.kill();
-                                    let _ = child.wait();
-                                    let stdout_data = stdout_handle.join().unwrap_or_default();
-                                    let stderr_data = stderr_handle.join().unwrap_or_default();
-                                    let stdout = String::from_utf8_lossy(&stdout_data);
-                                    let stderr = String::from_utf8_lossy(&stderr_data);
-                                    let mut result =
-                                        format!("Error: command timed out after {}s", secs);
-                                    if !stdout.is_empty() {
-                                        result.push_str("\n[stdout] ");
-                                        result.push_str(&stdout);
-                                    }
-                                    if !stderr.is_empty() {
-                                        result.push_str("\n[stderr] ");
-                                        result.push_str(&stderr);
-                                    }
-                                    return result;
+                                let mut result =
+                                    format!("Error: command timed out after {}s", secs);
+                                if !stdout.is_empty() {
+                                    result.push_str("\n[stdout] ");
+                                    result.push_str(&stdout);
                                 }
-                                thread::sleep(Duration::from_millis(50));
+                                if !stderr.is_empty() {
+                                    result.push_str("\n[stderr] ");
+                                    result.push_str(&stderr);
+                                }
+                                return Ok(result);
                             }
-                            Err(e) => return format!("Error waiting for process: {}", e),
+                            thread::sleep(Duration::from_millis(50));
+                        }
+                        Err(e) => {
+                            return Err(HandlerError::Execution {
+                                message: format!("Error waiting for process: {}", e),
+                            });
                         }
                     }
                 }
-                None => match child.wait_with_output() {
-                    Ok(output) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        format_command_output(&stdout, &stderr, output.status.code())
-                    }
-                    Err(e) => format!("Error waiting for process: {}", e),
-                },
             }
-        }),
-    );
-
-    // read_file
-    let sandbox_read = PathSandbox::new(workspace);
-    dispatch.insert(
-        "read_file".to_string(),
-        Box::new(move |input| {
-            let path_str = match input.get("path").and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => return "Error: missing 'path' field".to_string(),
-            };
-            let resolved = match sandbox_read.safe_path(path_str) {
-                Ok(p) => p,
-                Err(e) => return format!("Error: {}", e),
-            };
-            match std::fs::read_to_string(&resolved) {
-                Ok(contents) => {
-                    let offset = input
-                        .get("offset")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(1)
-                        .max(1) as usize;
-                    let limit = input
-                        .get("limit")
-                        .and_then(|v| v.as_u64())
-                        .map(|n| n as usize)
-                        .unwrap_or(usize::MAX);
-                    contents
-                        .lines()
-                        .skip(offset - 1)
-                        .take(limit)
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
-                Err(e) => format!("Error: {}", e),
-            }
-        }),
-    );
-
-    // write_file
-    let sandbox_write = PathSandbox::new(workspace);
-    dispatch.insert(
-        "write_file".to_string(),
-        Box::new(move |input| {
-            let path_str = match input.get("path").and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => return "Error: missing 'path' field".to_string(),
-            };
-            let content = match input.get("content").and_then(|v| v.as_str()) {
-                Some(c) => c,
-                None => return "Error: missing 'content' field".to_string(),
-            };
-            let resolved = match sandbox_write.safe_path(path_str) {
-                Ok(p) => p,
-                Err(e) => return format!("Error: {}", e),
-            };
-            if let Some(parent) = resolved.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    return format!("Error creating directories: {}", e);
-                }
-            }
-            match std::fs::write(&resolved, content) {
-                Ok(()) => format!("Wrote {} bytes to {}", content.len(), path_str),
-                Err(e) => format!("Error: {}", e),
-            }
-        }),
-    );
-
-    // edit_file
-    let sandbox_edit = PathSandbox::new(workspace);
-    dispatch.insert(
-        "edit_file".to_string(),
-        Box::new(move |input| {
-            let path_str = match input.get("path").and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => return "Error: missing 'path' field".to_string(),
-            };
-            let old_text = match input.get("old_text").and_then(|v| v.as_str()) {
-                Some(t) => t,
-                None => return "Error: missing 'old_text' field".to_string(),
-            };
-            let new_text = match input.get("new_text").and_then(|v| v.as_str()) {
-                Some(t) => t,
-                None => return "Error: missing 'new_text' field".to_string(),
-            };
-            let resolved = match sandbox_edit.safe_path(path_str) {
-                Ok(p) => p,
-                Err(e) => return format!("Error: {}", e),
-            };
-            match std::fs::read_to_string(&resolved) {
-                Ok(contents) => {
-                    if !contents.contains(old_text) {
-                        return format!("Error: old_text not found in {}", path_str);
-                    }
-                    let updated = contents.replacen(old_text, new_text, 1);
-                    match std::fs::write(&resolved, &updated) {
-                        Ok(()) => format!("Edited {}", path_str),
-                        Err(e) => format!("Error writing: {}", e),
-                    }
-                }
-                Err(e) => format!("Error reading: {}", e),
-            }
-        }),
-    );
-
-    // grep (uses ripgrep)
-    let sandbox_grep = PathSandbox::new(workspace);
-    let ws_grep = workspace.to_path_buf();
-    dispatch.insert(
-        "grep".to_string(),
-        Box::new(move |input| {
-            let pattern = match input.get("pattern").and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => return "Error: missing 'pattern' field".to_string(),
-            };
-
-            let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
-
-            let search_dir = match resolve_path(&input, &sandbox_grep, &ws_grep) {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
-
-            let mut cmd = Command::new("rg");
-            cmd.arg("--no-heading")
-                .arg("--line-number")
-                .arg("--color=never");
-
-            if input
-                .get("ignore_case")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                cmd.arg("-i");
-            }
-            if input
-                .get("literal")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                cmd.arg("--fixed-strings");
-            }
-            if let Some(ctx) = input.get("context").and_then(|v| v.as_u64()) {
-                cmd.arg("-C").arg(ctx.to_string());
-            }
-            if let Some(glob) = input.get("glob").and_then(|v| v.as_str()) {
-                cmd.arg("--glob").arg(glob);
-            }
-
-            cmd.arg("--").arg(pattern).arg(&search_dir);
-
-            match cmd.output() {
+            None => match child.wait_with_output() {
                 Ok(output) => {
-                    let result = format_external_output(output, "No matches found.");
-                    // Apply line limit: --max-count is per-file, so we limit total lines here
-                    let lines: Vec<&str> = result.lines().take(limit as usize).collect();
-                    if lines.len() < result.lines().count() {
-                        format!("{}\n... (truncated to {} lines)", lines.join("\n"), limit)
-                    } else {
-                        result
-                    }
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    Ok(format_command_output(
+                        &stdout,
+                        &stderr,
+                        output.status.code(),
+                    ))
                 }
-                Err(e) => format!("Error running rg: {}", e),
+                Err(e) => Err(HandlerError::Execution {
+                    message: format!("Error waiting for process: {}", e),
+                }),
+            },
+        }
+    }
+}
+
+pub struct ReadFileHandler {
+    pub sandbox: Arc<PathSandbox>,
+}
+
+impl Handler for ReadFileHandler {
+    fn call(&self, _ctx: &AgentContext, input: serde_json::Value) -> HandlerResult {
+        let path_str = require_str(&input, "path")?;
+        let resolved = self.sandbox.safe_path(path_str).map_err(exec_err)?;
+        match std::fs::read_to_string(&resolved) {
+            Ok(contents) => {
+                let offset = input
+                    .get("offset")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1)
+                    .max(1) as usize;
+                let limit = input
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(usize::MAX);
+                Ok(contents
+                    .lines()
+                    .skip(offset - 1)
+                    .take(limit)
+                    .collect::<Vec<_>>()
+                    .join("\n"))
             }
-        }),
-    );
+            Err(e) => Err(exec_err(e)),
+        }
+    }
+}
 
-    // find (uses fd)
-    let sandbox_find = PathSandbox::new(workspace);
-    let ws_find = workspace.to_path_buf();
-    dispatch.insert(
-        "find".to_string(),
-        Box::new(move |input| {
-            let pattern = match input.get("pattern").and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => return "Error: missing 'pattern' field".to_string(),
-            };
+pub struct WriteFileHandler {
+    pub sandbox: Arc<PathSandbox>,
+}
 
-            let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(1000);
+impl Handler for WriteFileHandler {
+    fn call(&self, _ctx: &AgentContext, input: serde_json::Value) -> HandlerResult {
+        let path_str = require_str(&input, "path")?;
+        let content = require_str(&input, "content")?;
+        let resolved = self.sandbox.safe_path(path_str).map_err(exec_err)?;
+        if let Some(parent) = resolved.parent() {
+            std::fs::create_dir_all(parent).map_err(exec_err)?;
+        }
+        std::fs::write(&resolved, content).map_err(exec_err)?;
+        Ok(format!("Wrote {} bytes to {}", content.len(), path_str))
+    }
+}
 
-            let search_dir = match resolve_path(&input, &sandbox_find, &ws_find) {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
+pub struct EditFileHandler {
+    pub sandbox: Arc<PathSandbox>,
+}
 
-            let output = Command::new("fd")
-                .arg("--glob")
-                .arg(pattern)
-                .arg("--color=never")
-                .arg("--max-results")
-                .arg(limit.to_string())
-                .arg(&search_dir)
-                .output();
+impl Handler for EditFileHandler {
+    fn call(&self, _ctx: &AgentContext, input: serde_json::Value) -> HandlerResult {
+        let path_str = require_str(&input, "path")?;
+        let old_text = require_str(&input, "old_text")?;
+        let new_text = require_str(&input, "new_text")?;
+        let resolved = self.sandbox.safe_path(path_str).map_err(exec_err)?;
+        let contents = std::fs::read_to_string(&resolved).map_err(exec_err)?;
+        if !contents.contains(old_text) {
+            return Err(HandlerError::Execution {
+                message: format!("old_text not found in {}", path_str),
+            });
+        }
+        let updated = contents.replacen(old_text, new_text, 1);
+        std::fs::write(&resolved, &updated).map_err(exec_err)?;
+        Ok(format!("Edited {}", path_str))
+    }
+}
 
-            match output {
-                Ok(output) => format_external_output(output, "No files found."),
-                Err(e) => format!("Error running fd: {}", e),
-            }
-        }),
-    );
+pub struct GrepHandler {
+    pub sandbox: Arc<PathSandbox>,
+    pub workspace: PathBuf,
+}
 
-    // ls
-    let sandbox_ls = PathSandbox::new(workspace);
-    let ws_ls = workspace.to_path_buf();
-    dispatch.insert(
-        "ls".to_string(),
-        Box::new(move |input| {
-            let dir = match resolve_path(&input, &sandbox_ls, &ws_ls) {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
+impl Handler for GrepHandler {
+    fn call(&self, _ctx: &AgentContext, input: serde_json::Value) -> HandlerResult {
+        let pattern = require_str(&input, "pattern")?;
 
-            let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
+        let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
 
-            let entries = match std::fs::read_dir(&dir) {
-                Ok(entries) => entries,
-                Err(e) => return format!("Error: {}", e),
-            };
+        let search_dir = resolve_path(&input, &self.sandbox, &self.workspace).map_err(exec_err)?;
 
-            let mut names: Vec<String> = Vec::new();
-            for entry in entries {
-                match entry {
-                    Ok(e) => {
-                        let mut name = e.file_name().to_string_lossy().to_string();
-                        if e.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                            name.push('/');
-                        }
-                        names.push(name);
-                    }
-                    Err(_) => continue,
+        let mut cmd = Command::new("rg");
+        cmd.arg("--no-heading")
+            .arg("--line-number")
+            .arg("--color=never");
+
+        if input
+            .get("ignore_case")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            cmd.arg("-i");
+        }
+        if input
+            .get("literal")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            cmd.arg("--fixed-strings");
+        }
+        if let Some(context_lines) = input.get("context").and_then(|v| v.as_u64()) {
+            cmd.arg("-C").arg(context_lines.to_string());
+        }
+        if let Some(glob) = input.get("glob").and_then(|v| v.as_str()) {
+            cmd.arg("--glob").arg(glob);
+        }
+
+        cmd.arg("--").arg(pattern).arg(&search_dir);
+
+        match cmd.output() {
+            Ok(output) => {
+                let result = format_external_output(output, "No matches found.");
+                let limit_usize = limit as usize;
+                let lines: Vec<&str> = result.lines().collect();
+                if lines.len() > limit_usize {
+                    let truncated = lines[..limit_usize].join("\n");
+                    Ok(format!("{}\n... (truncated to {} lines)", truncated, limit))
+                } else {
+                    Ok(result)
                 }
             }
+            Err(e) => Err(HandlerError::Execution {
+                message: format!("Error running rg: {}", e),
+            }),
+        }
+    }
+}
 
-            names.sort();
-            names.truncate(limit);
-            if names.is_empty() {
-                "(empty directory)".to_string()
-            } else {
-                names.join("\n")
+pub struct FindHandler {
+    pub sandbox: Arc<PathSandbox>,
+    pub workspace: PathBuf,
+}
+
+impl Handler for FindHandler {
+    fn call(&self, _ctx: &AgentContext, input: serde_json::Value) -> HandlerResult {
+        let pattern = require_str(&input, "pattern")?;
+
+        let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(1000);
+
+        let search_dir = resolve_path(&input, &self.sandbox, &self.workspace).map_err(exec_err)?;
+
+        let output = Command::new("fd")
+            .arg("--glob")
+            .arg(pattern)
+            .arg("--color=never")
+            .arg("--max-results")
+            .arg(limit.to_string())
+            .arg(&search_dir)
+            .output();
+
+        match output {
+            Ok(output) => Ok(format_external_output(output, "No files found.")),
+            Err(e) => Err(HandlerError::Execution {
+                message: format!("Error running fd: {}", e),
+            }),
+        }
+    }
+}
+
+pub struct LsHandler {
+    pub sandbox: Arc<PathSandbox>,
+    pub workspace: PathBuf,
+}
+
+impl Handler for LsHandler {
+    fn call(&self, _ctx: &AgentContext, input: serde_json::Value) -> HandlerResult {
+        let dir = resolve_path(&input, &self.sandbox, &self.workspace).map_err(exec_err)?;
+
+        let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
+
+        let entries = std::fs::read_dir(&dir).map_err(exec_err)?;
+
+        let mut names: Vec<String> = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(e) => {
+                    let mut name = e.file_name().to_string_lossy().to_string();
+                    if e.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                        name.push('/');
+                    }
+                    names.push(name);
+                }
+                Err(_) => continue,
             }
+        }
+
+        names.sort();
+        names.truncate(limit);
+        if names.is_empty() {
+            Ok("(empty directory)".to_string())
+        } else {
+            Ok(names.join("\n"))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Build registry (replaces build_dispatch)
+// ---------------------------------------------------------------------------
+
+/// Build a handler registry with real tool handlers rooted at the given workspace.
+pub fn build_registry(workspace: &Path) -> HandlerRegistry {
+    let mut reg = HandlerRegistry::new();
+    let sandbox = Arc::new(PathSandbox::new(workspace));
+
+    reg.register(
+        "bash",
+        Chain::new(Arc::new(BashHandler {
+            workspace: workspace.to_path_buf(),
+        }))
+        .with(with_output_cap(50 * 1024))
+        .build(),
+    );
+
+    reg.register(
+        "read_file",
+        Chain::new(Arc::new(ReadFileHandler {
+            sandbox: Arc::clone(&sandbox),
+        }))
+        .with(with_output_cap(100 * 1024))
+        .build(),
+    );
+
+    reg.register(
+        "write_file",
+        Arc::new(WriteFileHandler {
+            sandbox: Arc::clone(&sandbox),
         }),
     );
 
-    dispatch
+    reg.register(
+        "edit_file",
+        Arc::new(EditFileHandler {
+            sandbox: Arc::clone(&sandbox),
+        }),
+    );
+
+    reg.register(
+        "grep",
+        Chain::new(Arc::new(GrepHandler {
+            sandbox: Arc::clone(&sandbox),
+            workspace: workspace.to_path_buf(),
+        }))
+        .with(with_output_cap(50 * 1024))
+        .build(),
+    );
+
+    reg.register(
+        "find",
+        Chain::new(Arc::new(FindHandler {
+            sandbox: Arc::clone(&sandbox),
+            workspace: workspace.to_path_buf(),
+        }))
+        .with(with_output_cap(50 * 1024))
+        .build(),
+    );
+
+    reg.register(
+        "ls",
+        Arc::new(LsHandler {
+            sandbox,
+            workspace: workspace.to_path_buf(),
+        }),
+    );
+
+    reg
 }
 
 // ---------------------------------------------------------------------------

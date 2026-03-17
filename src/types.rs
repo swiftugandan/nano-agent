@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -132,13 +131,6 @@ impl From<std::io::Error> for AgentError {
 }
 
 // ---------------------------------------------------------------------------
-// Type aliases
-// ---------------------------------------------------------------------------
-
-pub type ToolHandler = Box<dyn Fn(serde_json::Value) -> String + Send + Sync>;
-pub type Dispatch = HashMap<String, ToolHandler>;
-
-// ---------------------------------------------------------------------------
 // CompactSignal: allows LLM to request on-demand compaction
 // ---------------------------------------------------------------------------
 
@@ -188,30 +180,4 @@ pub enum ToolEvent {
         error: String,
         duration: std::time::Duration,
     },
-}
-
-// ---------------------------------------------------------------------------
-// LoopSignals: bundles optional signals for run_agent_loop
-// ---------------------------------------------------------------------------
-
-pub struct LoopSignals<'a> {
-    pub compact_signal: Option<&'a CompactSignal>,
-    pub transcript_dir: Option<&'a std::path::Path>,
-    pub idle_signal: Option<&'a AtomicBool>,
-    pub tool_callback: Option<&'a dyn Fn(ToolEvent)>,
-    pub interrupt_signal: Option<&'a AtomicBool>,
-    pub projector: Option<&'a crate::context::Projector>,
-}
-
-impl<'a> LoopSignals<'a> {
-    pub fn none() -> Self {
-        Self {
-            compact_signal: None,
-            transcript_dir: None,
-            idle_signal: None,
-            tool_callback: None,
-            interrupt_signal: None,
-            projector: None,
-        }
-    }
 }

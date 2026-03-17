@@ -1,4 +1,5 @@
 use nano_agent::core_loop::*;
+use nano_agent::handler::{AgentContext, HandlerRegistry};
 use nano_agent::mock::*;
 use nano_agent::types::*;
 use std::collections::HashMap;
@@ -12,15 +13,11 @@ fn test_l1_01_loop_terminates_on_end_turn() {
     let mut llm = MockLLM::new();
     llm.queue("end_turn", vec![make_text_block("Done.")]);
 
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = HandlerRegistry::new();
+    let ctx = AgentContext::mock(tmp.path());
     let mut messages = vec![serde_json::json!({"role": "user", "content": "Hello"})];
-    let call_count = run_agent_loop(
-        &mut llm,
-        "Test",
-        &mut messages,
-        &[],
-        &HashMap::new(),
-        &LoopSignals::none(),
-    );
+    let call_count = run_agent_loop(&mut llm, "Test", &mut messages, &[], &registry, &ctx);
 
     assert_eq!(call_count, 1);
     assert_eq!(messages.len(), 2); // user + assistant
@@ -40,15 +37,17 @@ fn test_l1_02_loop_continues_on_tool_use() {
     );
     llm.queue("end_turn", vec![make_text_block("Got it.")]);
 
-    let dispatch = make_dispatch(HashMap::from([("echo".to_string(), "hello".to_string())]));
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = make_registry(HashMap::from([("echo".to_string(), "hello".to_string())]));
+    let ctx = AgentContext::mock(tmp.path());
     let mut messages = vec![serde_json::json!({"role": "user", "content": "Echo hello"})];
     let call_count = run_agent_loop(
         &mut llm,
         "Test",
         &mut messages,
         &[serde_json::json!({"name": "echo"})],
-        &dispatch,
-        &LoopSignals::none(),
+        &registry,
+        &ctx,
     );
 
     assert_eq!(call_count, 2);
@@ -79,15 +78,17 @@ fn test_l1_07_tool_result_ids_match_tool_use_ids() {
     );
     llm.queue("end_turn", vec![make_text_block("Done.")]);
 
-    let dispatch = make_dispatch(HashMap::from([("echo".to_string(), "test".to_string())]));
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = make_registry(HashMap::from([("echo".to_string(), "test".to_string())]));
+    let ctx = AgentContext::mock(tmp.path());
     let mut messages = vec![serde_json::json!({"role": "user", "content": "Test correlation"})];
     run_agent_loop(
         &mut llm,
         "Test",
         &mut messages,
         &[serde_json::json!({"name": "echo"})],
-        &dispatch,
-        &LoopSignals::none(),
+        &registry,
+        &ctx,
     );
 
     // Find tool_use ids from assistant messages
@@ -122,16 +123,18 @@ fn test_l1_07_tool_result_ids_match_tool_use_ids() {
 
 #[test]
 fn test_l1_03_dispatch_routes_to_correct_handler() {
-    let dispatch = make_dispatch(HashMap::from([
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = make_registry(HashMap::from([
         ("foo".to_string(), "foo_result".to_string()),
         ("bar".to_string(), "bar_result".to_string()),
     ]));
+    let ctx = AgentContext::mock(tmp.path());
     assert_eq!(
-        route(&dispatch, "foo", serde_json::json!({})),
+        registry.route(&ctx, "foo", serde_json::json!({})),
         Ok("foo_result".to_string())
     );
     assert_eq!(
-        route(&dispatch, "bar", serde_json::json!({})),
+        registry.route(&ctx, "bar", serde_json::json!({})),
         Ok("bar_result".to_string())
     );
 }
@@ -149,19 +152,14 @@ fn test_l1_04_unknown_tool_returns_error_string() {
     );
     llm.queue("end_turn", vec![make_text_block("Ok.")]);
 
-    let dispatch = make_dispatch(HashMap::from([(
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = make_registry(HashMap::from([(
         "foo".to_string(),
         "foo_result".to_string(),
     )]));
+    let ctx = AgentContext::mock(tmp.path());
     let mut messages = vec![serde_json::json!({"role": "user", "content": "Test"})];
-    run_agent_loop(
-        &mut llm,
-        "Test",
-        &mut messages,
-        &[],
-        &dispatch,
-        &LoopSignals::none(),
-    );
+    run_agent_loop(&mut llm, "Test", &mut messages, &[], &registry, &ctx);
 
     // The tool_result should contain "Unknown tool"
     for msg in &messages {

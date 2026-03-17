@@ -7,10 +7,11 @@ use nano_agent::concurrency::BackgroundManager;
 use nano_agent::context::{MemorySeed, Projector, SeedCollector, SkillSeed, TaskSeed, TodoSeed};
 use nano_agent::core_loop::run_agent_loop;
 use nano_agent::delivery::{DeliveryQueue, DeliveryRunner};
-use nano_agent::dispatch::{
-    auth_prefix_for, build_extended_dispatch, wrap_llm, AgentConfig, DispatchContext, Services,
-};
+use nano_agent::dispatch::{auth_prefix_for, build_extended_registry, wrap_llm};
 use nano_agent::gateway::Gateway;
+use nano_agent::handler::{
+    AgentContext, AgentIdentity, AgentServices, AgentSignals, HandlerRegistry,
+};
 use nano_agent::heartbeat::HeartbeatManager;
 use nano_agent::isolation::EventBus;
 use nano_agent::knowledge::SkillLoader;
@@ -33,21 +34,424 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const SESSION_EVICTION_DAYS: u64 = 30;
+const MEMORY_EVICTION_DAYS: u64 = 90;
+const PROJECTOR_CHAR_THRESHOLD: usize = 8_000;
+const NAG_POLICY_INTERVAL: usize = 3;
+
+const VALID_BACKENDS: &[&str] = &["anthropic", "openai"];
+const RECENT_EVENTS_COUNT: usize = 20;
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+struct Config {
+    backend: String,
+    agent_name: String,
+    agent_role: String,
+    skills_dir: Option<PathBuf>,
+    resume_session: Option<String>,
+}
+
+impl Config {
+    fn from_env(cli: &Cli) -> Self {
+        let raw_backend = std::env::var("LLM_BACKEND").unwrap_or_else(|_| "anthropic".into());
+        let backend = if VALID_BACKENDS.contains(&raw_backend.as_str()) {
+            raw_backend
+        } else {
+            eprintln!(
+                "warning: unknown LLM_BACKEND {:?}, falling back to \"anthropic\" (valid: {:?})",
+                raw_backend, VALID_BACKENDS
+            );
+            "anthropic".into()
+        };
+        let agent_name = std::env::var("AGENT_NAME").unwrap_or_else(|_| "lead".into());
+        let agent_role = std::env::var("AGENT_ROLE").unwrap_or_else(|_| "developer".into());
+        let skills_dir = std::env::var("SKILLS_DIR").map(PathBuf::from).ok();
+        let resume_session = std::env::var("RESUME_SESSION")
+            .ok()
+            .or_else(|| cli.resume.clone());
+        Self {
+            backend,
+            agent_name,
+            agent_role,
+            skills_dir,
+            resume_session,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Slash command handling
+// ---------------------------------------------------------------------------
+
+enum SlashResult {
+    Handled,
+    Quit,
+    NotSlash,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_slash_command(
+    input: &str,
+    messages: &mut Vec<serde_json::Value>,
+    prev_message_count: &mut usize,
+    transcript_store: &memory::TranscriptStore,
+    ctx: &AgentContext,
+    session_dir: &std::path::Path,
+    repl_start: Instant,
+    model_name: &str,
+) -> SlashResult {
+    let identity = &ctx.identity;
+    match input {
+        "/quit" => SlashResult::Quit,
+        "/clear" => {
+            transcript_store.save(messages);
+            ctx.services
+                .sessions
+                .append_turn(&messages[*prev_message_count..]);
+            messages.clear();
+            *prev_message_count = 0;
+            UiRenderer::show_warning("Transcript saved. Session finalized.");
+            SlashResult::Handled
+        }
+        "/status" => {
+            let tokens = memory::estimate_tokens(messages);
+            let todo_state = ctx
+                .services
+                .todo
+                .read()
+                .expect("TodoManager read lock poisoned")
+                .render();
+            let bg_notifs = ctx
+                .services
+                .bg
+                .lock()
+                .expect("BackgroundManager lock poisoned")
+                .drain_notifications();
+            UiRenderer::show_status(&nano_agent::ui::StatusInfo {
+                tokens,
+                turns: messages.len(),
+                session_id: &identity.session_id,
+                backend: &ctx.llm_backend,
+                model: model_name,
+                uptime: repl_start.elapsed(),
+                todo_state: &todo_state,
+                bg_count: bg_notifs.len(),
+            });
+            SlashResult::Handled
+        }
+        "/tasks" => {
+            println!(
+                "{}\n",
+                ctx.services
+                    .task_manager
+                    .read()
+                    .expect("TaskManager read lock poisoned")
+                    .list_all()
+            );
+            SlashResult::Handled
+        }
+        "/team" => {
+            println!(
+                "{}\n",
+                ctx.services
+                    .teammate_manager
+                    .read()
+                    .expect("TeammateManager read lock poisoned")
+                    .list_all()
+            );
+            SlashResult::Handled
+        }
+        "/events" => {
+            println!(
+                "{}\n",
+                ctx.services.event_bus.list_recent(RECENT_EVENTS_COUNT)
+            );
+            SlashResult::Handled
+        }
+        "/resume" => {
+            let sessions = memory::SessionStore::list_sessions(session_dir);
+            if sessions.is_empty() {
+                UiRenderer::show_warning("No sessions found.");
+            } else {
+                println!("[resume] Available sessions:");
+                for (id, path) in &sessions {
+                    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    println!("  {} ({} bytes)", id, size);
+                }
+                println!("  Use: RESUME_SESSION=<id> agent  or  agent --resume <id>\n");
+            }
+            SlashResult::Handled
+        }
+        "/help" => {
+            println!("  /quit    Exit the agent");
+            println!("  /clear   Save transcript and reset conversation");
+            println!("  /status  Show session status (tokens, turns, todos)");
+            println!("  /tasks   List background tasks");
+            println!("  /team    List teammates");
+            println!("  /events  Show recent events");
+            println!("  /resume  List sessions available to resume");
+            println!("  /help    Show this help");
+            println!();
+            SlashResult::Handled
+        }
+        _ => SlashResult::NotSlash,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pre-turn pipeline
+// ---------------------------------------------------------------------------
+
+/// Runs identity injection, token compaction, nag policy, background
+/// notifications, inbox drain, and heartbeat drain. Returns the token count
+/// so the caller can reuse it for prompt-state updates.
+#[allow(clippy::too_many_arguments)]
+fn build_pre_turn_context(
+    messages: &mut Vec<serde_json::Value>,
+    ctx: &AgentContext,
+    llm: &mut dyn Llm,
+    transcript_dir: &std::path::Path,
+    projector: &Projector,
+    turn_count: usize,
+    memory_seed: &MemorySeed,
+    input: &str,
+) -> usize {
+    // L10: Inject identity if conversation is fresh
+    autonomy::inject_identity_if_needed(
+        messages,
+        &ctx.identity.name,
+        &ctx.identity.role,
+        "nano-agent",
+    );
+
+    // L5: Token estimation and memory compaction
+    let mut token_count = memory::estimate_tokens(messages);
+    if token_count > memory::MICRO_COMPACT_THRESHOLD {
+        memory::micro_compact(messages);
+    }
+    if token_count > memory::THRESHOLD {
+        let (new_msgs, path) = memory::auto_compact(messages, llm, transcript_dir);
+        *messages = new_msgs;
+        UiRenderer::show_compact_notice(&path.display().to_string());
+        token_count = memory::estimate_tokens(messages);
+    }
+
+    // Render todo state once for nag policy
+    let todo_state = ctx
+        .services
+        .todo
+        .read()
+        .expect("TodoManager read lock poisoned")
+        .render();
+
+    // L2: Nag policy
+    {
+        let mut nag = ctx.services.nag.lock().expect("NagPolicy lock poisoned");
+        nag.tick();
+        if nag.should_inject() {
+            let nag_msg = format!(
+                "[System reminder: You haven't updated your todo list recently. Current state:\n{}]",
+                todo_state
+            );
+            messages.push(serde_json::json!({"role": "user", "content": nag_msg}));
+        }
+    }
+
+    // L7: Drain background notifications (projected)
+    {
+        let notifs = ctx
+            .services
+            .bg
+            .lock()
+            .expect("BackgroundManager lock poisoned")
+            .drain_notifications();
+        if !notifs.is_empty() {
+            for n in &notifs {
+                UiRenderer::show_background_notification(
+                    &n.task_id,
+                    &format!("{}: {}", n.status, n.result.trim()),
+                );
+            }
+            let text: Vec<String> = notifs
+                .iter()
+                .map(|n| {
+                    format!(
+                        "[Background {} {}]: {}",
+                        n.task_id,
+                        n.status,
+                        n.result.trim()
+                    )
+                })
+                .collect();
+            let raw = text.join("\n");
+            let projected = projector.project("background", &format!("turn_{}", turn_count), &raw);
+            messages.push(serde_json::json!({"role": "user", "content": projected}));
+        }
+    }
+
+    // L8: Check inbox (projected)
+    {
+        let inbox = ctx.services.message_bus.read_inbox(&ctx.identity.name);
+        if !inbox.is_empty() {
+            let text = autonomy::format_inbox(&inbox);
+            let projected = projector.project("inbox", &format!("turn_{}", turn_count), &text);
+            messages.push(serde_json::json!({"role": "user", "content": projected}));
+        }
+    }
+
+    // Heartbeat: drain cron events (projected)
+    {
+        let events = ctx.services.heartbeat_manager.drain_events();
+        if !events.is_empty() {
+            let text = events
+                .iter()
+                .map(|e| format!("[Cron '{}' fired]: {}", e.name, e.prompt))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let projected = projector.project("heartbeat", &format!("turn_{}", turn_count), &text);
+            messages.push(serde_json::json!({"role": "user", "content": projected}));
+        }
+    }
+
+    // Set memory recall query for this turn's seed
+    memory_seed.set_query(input);
+
+    token_count
+}
+
+// ---------------------------------------------------------------------------
+// Oneshot mode
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn run_oneshot(
+    prompt: &str,
+    messages: &mut Vec<serde_json::Value>,
+    ctx: &AgentContext,
+    llm: &mut dyn Llm,
+    projector: &Projector,
+    memory_seed: &MemorySeed,
+    prompt_assembler: &mut PromptAssembler,
+    seed_collector: &SeedCollector,
+    tool_defs: &[serde_json::Value],
+    model_name: &str,
+    registry: &HandlerRegistry,
+    prev_message_count: usize,
+    transcript_store: &memory::TranscriptStore,
+) {
+    let projected_input = projector.project("user_input", "oneshot", prompt);
+    messages.push(serde_json::json!({
+        "role": "user",
+        "content": projected_input.as_str(),
+    }));
+
+    // Pre-turn pipeline (same stages as REPL)
+    let transcript_dir = ctx
+        .transcript_dir
+        .as_deref()
+        .expect("transcript_dir required for oneshot");
+    build_pre_turn_context(
+        messages,
+        ctx,
+        llm,
+        transcript_dir,
+        projector,
+        1,
+        memory_seed,
+        prompt,
+    );
+
+    prompt_assembler.reload();
+    let prompt_ctx = build_prompt_context(
+        &ctx.identity.name,
+        &ctx.identity.role,
+        &ctx.cwd,
+        tool_defs.len(),
+        model_name,
+        &ctx.identity.id,
+        &ctx.identity.session_id,
+        seed_collector.render(),
+    );
+    let system = prompt_assembler.compose(&prompt_ctx);
+
+    run_agent_loop(llm, &system, messages, tool_defs, registry, ctx);
+
+    // Print only the final assistant response text to stdout
+    if let Some(text) = extract_last_response_text(messages) {
+        print!("{}", text);
+    }
+
+    // Persist session
+    ctx.services
+        .sessions
+        .append_turn(&messages[prev_message_count..]);
+    transcript_store.save(messages);
+}
+
+// ---------------------------------------------------------------------------
+// Tool callback builder
+// ---------------------------------------------------------------------------
+
+fn build_tool_callback(spinner: &Arc<SpinnerHandle>) -> Arc<dyn Fn(ToolEvent) + Send + Sync> {
+    let spinner_ref = Arc::clone(spinner);
+    Arc::new(move |event: ToolEvent| match event {
+        ToolEvent::Start {
+            ref name,
+            ref input,
+        } => {
+            spinner_ref.pause_and_clear();
+            UiRenderer::show_tool_start(name, input);
+        }
+        ToolEvent::Complete {
+            ref name,
+            ref summary,
+            duration,
+        } => {
+            UiRenderer::show_tool_complete(name, summary, duration);
+            spinner_ref.update_label("reasoning");
+            spinner_ref.resume();
+        }
+        ToolEvent::Error {
+            ref name,
+            ref error,
+            duration,
+        } => {
+            UiRenderer::show_tool_error(name, error, duration);
+            spinner_ref.update_label("reasoning");
+            spinner_ref.resume();
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 fn main() {
     let cli = Cli::parse();
+    let config = Config::from_env(&cli);
 
-    let backend = std::env::var("LLM_BACKEND").unwrap_or_else(|_| "anthropic".into());
     let cwd = std::env::current_dir().expect("Failed to get current directory");
     let data_dir = cwd.join(".nano-agent");
-    std::fs::create_dir_all(&data_dir).ok();
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        eprintln!(
+            "warning: failed to create data directory {:?}: {}",
+            data_dir, e
+        );
+    }
 
     // -- Detect piped stdin and build oneshot prompt
     let piped_input = if !std::io::stdin().is_terminal() {
         let mut buf = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).ok();
+        if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf) {
+            eprintln!("warning: failed to read from stdin: {}", e);
+        }
         if buf.trim().is_empty() {
             None
         } else {
@@ -68,7 +472,7 @@ fn main() {
     // -- LLM backend (wrapped in resilience + ContextGuard layers)
     let transcript_dir = data_dir.join("transcripts");
     let (mut llm_box, model_name): (Box<dyn Llm>, String) = {
-        let (inner, model) = match backend.as_str() {
+        let (inner, model) = match config.backend.as_str() {
             "openai" => {
                 let llm = OpenAiLlm::from_env();
                 let m = llm.model.clone();
@@ -81,7 +485,7 @@ fn main() {
             }
         };
         (
-            wrap_llm(inner, auth_prefix_for(&backend), &transcript_dir),
+            wrap_llm(inner, auth_prefix_for(&config.backend), &transcript_dir),
             model,
         )
     };
@@ -94,25 +498,24 @@ fn main() {
     let events_path = data_dir.join("events.jsonl");
     let delivery_dir = data_dir.join("delivery");
     let memories_dir = data_dir.join("memories");
-    let skills_dir = std::env::var("SKILLS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| data_dir.join("skills"));
-
-    // -- Agent identity
-    let agent_name = std::env::var("AGENT_NAME").unwrap_or_else(|_| "lead".into());
-    let agent_role = std::env::var("AGENT_ROLE").unwrap_or_else(|_| "developer".into());
+    // -- Destructure config (consumes all fields, prevents partial-move footguns)
+    let Config {
+        backend,
+        agent_name,
+        agent_role,
+        skills_dir: skills_dir_override,
+        resume_session,
+    } = config;
+    let skills_dir = skills_dir_override.unwrap_or_else(|| data_dir.join("skills"));
     let agent_id = uuid::Uuid::new_v4().to_string();
 
     // -- GAP 2: Session management
-    let session_id = std::env::var("RESUME_SESSION")
-        .ok()
-        .or(cli.resume)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let session_id = resume_session.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let session_store = memory::SessionStore::new(&session_dir, &session_id);
 
     // -- Evict old data files at startup (skip in oneshot to avoid unnecessary I/O)
     if !oneshot {
-        memory::SessionStore::evict_old_sessions(&session_dir, 30);
+        memory::SessionStore::evict_old_sessions(&session_dir, SESSION_EVICTION_DAYS);
     }
 
     // -- Initialize all managers
@@ -122,7 +525,7 @@ fn main() {
     let transcript_store = memory::TranscriptStore::new(&transcript_dir);
     let background_manager = Arc::new(Mutex::new(BackgroundManager::new()));
     let todo_manager = Arc::new(RwLock::new(TodoManager::new()));
-    let nag_policy = Arc::new(Mutex::new(NagPolicy::new(3)));
+    let nag_policy = Arc::new(Mutex::new(NagPolicy::new(NAG_POLICY_INTERVAL)));
     let message_bus = Arc::new(MessageBus::new(&inbox_dir));
     let teammate_manager = Arc::new(RwLock::new(TeammateManager::new(&team_dir)));
     let request_tracker = Arc::new(RequestTracker::new());
@@ -131,7 +534,7 @@ fn main() {
     let memory_store_inner =
         MemoryStore::new(&data_dir.join("prompts").join("MEMORY.md"), &memories_dir);
     if !oneshot {
-        memory_store_inner.evict_old(90);
+        memory_store_inner.evict_old(MEMORY_EVICTION_DAYS);
     }
     let memory_store = Arc::new(memory_store_inner);
 
@@ -174,7 +577,6 @@ fn main() {
                 .lock()
                 .expect("ChannelManager lock poisoned")
                 .add(ws_channel);
-            // Gateway is kept alive by the channel manager holding the ws_channel Arc
         }
 
         // -- GAP 8: Start delivery runner
@@ -193,7 +595,7 @@ fn main() {
 
     // -- Projector: demand-paging write gate (8K char threshold)
     let projections_dir = data_dir.join("projections");
-    let projector = Projector::new(&projections_dir, 8_000);
+    let projector = Arc::new(Projector::new(&projections_dir, PROJECTOR_CHAR_THRESHOLD));
 
     // -- SeedCollector: uniform system prompt contribution
     let memory_seed = Arc::new(MemorySeed::new(Arc::clone(&memory_store)));
@@ -209,7 +611,6 @@ fn main() {
             .write()
             .expect("TeammateManager write lock poisoned")
             .spawn(&agent_name, &agent_role, "primary agent");
-        // Pre-warm: list team (ensures config is written)
         let _ = teammate_manager
             .read()
             .expect("TeammateManager read lock poisoned")
@@ -230,20 +631,22 @@ fn main() {
         .expect("Failed to install Ctrl+C handler");
     }
 
-    // -- Build tool definitions: base (4) + extended (24)
+    // -- Build tool definitions: base (7) + extended (28)
     let mut tool_defs = tools::tool_definitions();
     tool_defs.extend(tools::extended_tool_definitions());
 
-    // -- Build dispatch: base + extended
-    let mut dispatch = tools::build_dispatch(&cwd);
-    let extended = build_extended_dispatch(DispatchContext {
-        config: AgentConfig {
-            repo_root: cwd.to_path_buf(),
-            tasks_dir: tasks_dir.clone(),
-            agent_name: agent_name.clone(),
-            llm_backend: backend.clone(),
+    // -- Build AgentContext
+    let ctx = AgentContext {
+        identity: AgentIdentity {
+            name: agent_name.clone(),
+            role: agent_role.clone(),
+            id: agent_id.clone(),
+            session_id: session_id.clone(),
         },
-        services: Services {
+        tasks_dir: tasks_dir.clone(),
+        llm_backend: backend.clone(),
+        cwd: cwd.to_path_buf(),
+        services: AgentServices {
             todo: Arc::clone(&todo_manager),
             nag: Arc::clone(&nag_policy),
             skill_loader: Arc::clone(&skill_loader),
@@ -256,15 +659,26 @@ fn main() {
             heartbeat_manager: Arc::clone(&heartbeat_manager),
             memory_store: Arc::clone(&memory_store),
             delivery_queue: Arc::clone(&delivery_queue),
+            channels: Arc::clone(&channel_manager),
+            sessions: Arc::new(session_store),
         },
-        compact_signal: Arc::clone(&compact_signal),
-        idle_signal: Arc::clone(&idle_signal),
-    });
-    dispatch.extend(extended);
+        signals: AgentSignals {
+            compact: Arc::clone(&compact_signal),
+            idle: Arc::clone(&idle_signal),
+            interrupt: Some(Arc::clone(&interrupt_signal)),
+        },
+        projector: Some(Arc::clone(&projector)),
+        transcript_dir: Some(transcript_dir.clone()),
+        tool_callback: None, // set per-loop-iteration in REPL
+    };
+
+    // -- Build HandlerRegistry: base + extended
+    let mut registry = tools::build_registry(&cwd);
+    registry.extend(build_extended_registry(&ctx));
 
     // GAP 2: Rebuild messages from session if resuming
     let mut messages: Vec<serde_json::Value> = {
-        let rebuilt = session_store.rebuild();
+        let rebuilt = ctx.services.sessions.rebuild();
         if !rebuilt.is_empty() {
             if !oneshot {
                 eprintln!(
@@ -284,59 +698,21 @@ fn main() {
 
     // -- One-shot mode: run prompt, print response, exit
     if let Some(prompt) = oneshot_prompt {
-        let projected_input = projector.project("user_input", "oneshot", &prompt);
-        messages.push(serde_json::json!({
-            "role": "user",
-            "content": projected_input.as_str(),
-        }));
-
-        // Pre-turn pipeline (same as REPL)
-        if autonomy::should_inject(&messages) {
-            let identity = autonomy::make_identity_block(&agent_name, &agent_role, "nano-agent");
-            messages.insert(0, identity);
-        }
-
-        // Set query for memory recall seed
-        memory_seed.set_query(&prompt);
-
-        prompt_assembler.reload();
-        let ctx = build_prompt_context(
-            &agent_name,
-            &agent_role,
-            &cwd,
-            tool_defs.len(),
-            &model_name,
-            &agent_id,
-            &session_id,
-            seed_collector.render(),
-        );
-        let system = prompt_assembler.compose(&ctx);
-
-        let signals = LoopSignals {
-            compact_signal: Some(&compact_signal),
-            transcript_dir: Some(&transcript_dir),
-            idle_signal: None,
-            tool_callback: None,
-            interrupt_signal: Some(&interrupt_signal),
-            projector: Some(&projector),
-        };
-        run_agent_loop(
-            llm_box.as_mut(),
-            &system,
+        run_oneshot(
+            &prompt,
             &mut messages,
+            &ctx,
+            llm_box.as_mut(),
+            &projector,
+            &memory_seed,
+            &mut prompt_assembler,
+            &seed_collector,
             &tool_defs,
-            &dispatch,
-            &signals,
+            &model_name,
+            &registry,
+            prev_message_count,
+            &transcript_store,
         );
-
-        // Print only the final assistant response text to stdout
-        if let Some(text) = extract_last_response_text(&messages) {
-            print!("{}", text);
-        }
-
-        // Persist session
-        session_store.append_turn(&messages[prev_message_count..]);
-        transcript_store.save(&messages);
         return;
     }
 
@@ -379,89 +755,19 @@ fn main() {
         };
 
         // -- Slash commands
-        match input.as_str() {
-            "/quit" => break,
-            "/clear" => {
-                transcript_store.save(&messages);
-                session_store.append_turn(&messages[prev_message_count..]);
-                messages.clear();
-                prev_message_count = 0;
-                UiRenderer::show_warning("Transcript saved. Session finalized.");
-                continue;
-            }
-            "/status" => {
-                let tokens = memory::estimate_tokens(&messages);
-                let todo_state = todo_manager
-                    .read()
-                    .expect("TodoManager read lock poisoned")
-                    .render();
-                let bg_notifs = background_manager
-                    .lock()
-                    .expect("BackgroundManager lock poisoned")
-                    .drain_notifications();
-                UiRenderer::show_status(&nano_agent::ui::StatusInfo {
-                    tokens,
-                    turns: messages.len(),
-                    session_id: &session_id,
-                    backend: &backend,
-                    model: &model_name,
-                    uptime: repl_start.elapsed(),
-                    todo_state: &todo_state,
-                    bg_count: bg_notifs.len(),
-                });
-                continue;
-            }
-            "/tasks" => {
-                println!(
-                    "{}\n",
-                    task_manager
-                        .read()
-                        .expect("TaskManager read lock poisoned")
-                        .list_all()
-                );
-                continue;
-            }
-            "/team" => {
-                println!(
-                    "{}\n",
-                    teammate_manager
-                        .read()
-                        .expect("TeammateManager read lock poisoned")
-                        .list_all()
-                );
-                continue;
-            }
-            "/events" => {
-                println!("{}\n", event_bus.list_recent(20));
-                continue;
-            }
-            "/resume" => {
-                let sessions = memory::SessionStore::list_sessions(&session_dir);
-                if sessions.is_empty() {
-                    UiRenderer::show_warning("No sessions found.");
-                } else {
-                    println!("[resume] Available sessions:");
-                    for (id, path) in &sessions {
-                        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                        println!("  {} ({} bytes)", id, size);
-                    }
-                    println!("  Use: RESUME_SESSION=<id> agent  or  agent --resume <id>\n");
-                }
-                continue;
-            }
-            "/help" => {
-                println!("  /quit    Exit the agent");
-                println!("  /clear   Save transcript and reset conversation");
-                println!("  /status  Show session status (tokens, turns, todos)");
-                println!("  /tasks   List background tasks");
-                println!("  /team    List teammates");
-                println!("  /events  Show recent events");
-                println!("  /resume  List sessions available to resume");
-                println!("  /help    Show this help");
-                println!();
-                continue;
-            }
-            _ => {}
+        match handle_slash_command(
+            &input,
+            &mut messages,
+            &mut prev_message_count,
+            &transcript_store,
+            &ctx,
+            &session_dir,
+            repl_start,
+            &model_name,
+        ) {
+            SlashResult::Quit => break,
+            SlashResult::Handled => continue,
+            SlashResult::NotSlash => {}
         }
 
         // -- Add user message (projected through demand-paging gate)
@@ -474,106 +780,20 @@ fn main() {
         }));
 
         // -- Pre-turn pipeline
-
-        // L10: Inject identity if conversation is fresh
-        if autonomy::should_inject(&messages) {
-            let identity = autonomy::make_identity_block(&agent_name, &agent_role, "nano-agent");
-            messages.insert(0, identity);
-        }
-
-        // L5: Token estimation and memory compaction
-        let token_count = memory::estimate_tokens(&messages);
-        if token_count > memory::MICRO_COMPACT_THRESHOLD {
-            memory::micro_compact(&mut messages);
-        }
-        if token_count > memory::THRESHOLD {
-            let (new_msgs, path) =
-                memory::auto_compact(&messages, llm_box.as_mut(), &transcript_dir);
-            messages = new_msgs;
-            UiRenderer::show_compact_notice(&path.display().to_string());
-        }
-
-        // Render todo state once for nag policy
-        let todo_state = todo_manager
-            .read()
-            .expect("TodoManager read lock poisoned")
-            .render();
-
-        // L2: Nag policy
-        {
-            let mut nag = nag_policy.lock().expect("NagPolicy lock poisoned");
-            nag.tick();
-            if nag.should_inject() {
-                let nag_msg = format!(
-                    "[System reminder: You haven't updated your todo list recently. Current state:\n{}]",
-                    todo_state
-                );
-                messages.push(serde_json::json!({"role": "user", "content": nag_msg}));
-            }
-        }
-
-        // L7: Drain background notifications (projected)
-        {
-            let notifs = background_manager
-                .lock()
-                .expect("BackgroundManager lock poisoned")
-                .drain_notifications();
-            if !notifs.is_empty() {
-                for n in &notifs {
-                    UiRenderer::show_background_notification(
-                        &n.task_id,
-                        &format!("{}: {}", n.status, n.result.trim()),
-                    );
-                }
-                let text: Vec<String> = notifs
-                    .iter()
-                    .map(|n| {
-                        format!(
-                            "[Background {} {}]: {}",
-                            n.task_id,
-                            n.status,
-                            n.result.trim()
-                        )
-                    })
-                    .collect();
-                let raw = text.join("\n");
-                let projected =
-                    projector.project("background", &format!("turn_{}", turn_count), &raw);
-                messages.push(serde_json::json!({"role": "user", "content": projected}));
-            }
-        }
-
-        // L8: Check inbox (projected)
-        {
-            let inbox = message_bus.read_inbox(&agent_name);
-            if !inbox.is_empty() {
-                let text = autonomy::format_inbox(&inbox);
-                let projected = projector.project("inbox", &format!("turn_{}", turn_count), &text);
-                messages.push(serde_json::json!({"role": "user", "content": projected}));
-            }
-        }
-
-        // -- Heartbeat: drain cron events (projected)
-        {
-            let events = heartbeat_manager.drain_events();
-            if !events.is_empty() {
-                let text = events
-                    .iter()
-                    .map(|e| format!("[Cron '{}' fired]: {}", e.name, e.prompt))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let projected =
-                    projector.project("heartbeat", &format!("turn_{}", turn_count), &text);
-                messages.push(serde_json::json!({"role": "user", "content": projected}));
-            }
-        }
-
-        // -- Set memory recall query for this turn's seed
-        memory_seed.set_query(&input);
+        let token_count = build_pre_turn_context(
+            &mut messages,
+            &ctx,
+            llm_box.as_mut(),
+            &transcript_dir,
+            &projector,
+            turn_count,
+            &memory_seed,
+            &input,
+        );
 
         // -- Build dynamic system prompt via assembler with seed sections
         prompt_assembler.reload();
-        let ctx = build_prompt_context(
+        let prompt_ctx = build_prompt_context(
             &agent_name,
             &agent_role,
             &cwd,
@@ -583,57 +803,27 @@ fn main() {
             &session_id,
             seed_collector.render(),
         );
-        let system = prompt_assembler.compose(&ctx);
+        let system = prompt_assembler.compose(&prompt_ctx);
 
         // -- Start spinner and run the agent loop with tool callback
-        let spinner = SpinnerHandle::start("thinking");
-
-        let tool_cb = |event: ToolEvent| match event {
-            ToolEvent::Start {
-                ref name,
-                ref input,
-            } => {
-                spinner.pause_and_clear();
-                UiRenderer::show_tool_start(name, input);
-            }
-            ToolEvent::Complete {
-                ref name,
-                ref summary,
-                duration,
-            } => {
-                UiRenderer::show_tool_complete(name, summary, duration);
-                spinner.update_label("reasoning");
-                spinner.resume();
-            }
-            ToolEvent::Error {
-                ref name,
-                ref error,
-                duration,
-            } => {
-                UiRenderer::show_tool_error(name, error, duration);
-                spinner.update_label("reasoning");
-                spinner.resume();
-            }
-        };
+        let spinner = Arc::new(SpinnerHandle::start("thinking"));
+        let tool_cb = build_tool_callback(&spinner);
 
         // Clear interrupt flag before each agent loop run
         interrupt_signal.store(false, Ordering::Release);
 
-        let signals = LoopSignals {
-            compact_signal: Some(&compact_signal),
-            transcript_dir: Some(&transcript_dir),
-            idle_signal: None,
-            tool_callback: Some(&tool_cb),
-            interrupt_signal: Some(&interrupt_signal),
-            projector: Some(&projector),
+        // Create per-iteration context with callback
+        let loop_ctx = AgentContext {
+            tool_callback: Some(tool_cb),
+            ..ctx.clone()
         };
         let _calls = run_agent_loop(
             llm_box.as_mut(),
             &system,
             &mut messages,
             &tool_defs,
-            &dispatch,
-            &signals,
+            &registry,
+            &loop_ctx,
         );
 
         // Stop spinner (Drop joins the thread)
@@ -647,7 +837,9 @@ fn main() {
 
         // -- GAP 2: Persist new messages to session
         if messages.len() > prev_message_count {
-            session_store.append_turn(&messages[prev_message_count..]);
+            ctx.services
+                .sessions
+                .append_turn(&messages[prev_message_count..]);
             prev_message_count = messages.len();
         }
 
@@ -656,9 +848,8 @@ fn main() {
             UiRenderer::show_response(&text);
         }
 
-        // -- Update prompt state for next turn
+        // -- Update prompt state for next turn (reuse token_count from pre-turn)
         {
-            let token_count = memory::estimate_tokens(&messages);
             let mut ps = prompt_state.lock().expect("PromptState lock poisoned");
             ps.turn += 1;
             ps.tokens = token_count;
@@ -671,7 +862,9 @@ fn main() {
     // -- Save transcript on exit
     if !messages.is_empty() {
         transcript_store.save(&messages);
-        session_store.append_turn(&messages[prev_message_count..]);
+        ctx.services
+            .sessions
+            .append_turn(&messages[prev_message_count..]);
         UiRenderer::show_warning("Transcript and session saved.");
     }
 }
