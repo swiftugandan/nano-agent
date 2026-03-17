@@ -12,7 +12,7 @@ pub fn estimate_tokens(messages: &[serde_json::Value]) -> usize {
 
 /// Layer 1: micro_compact — replace old tool_results with placeholders.
 /// Preserves the last KEEP_RECENT tool_results.
-pub fn micro_compact(messages: &mut Vec<serde_json::Value>) {
+pub fn micro_compact(messages: &mut [serde_json::Value]) {
     // Collect indices of all tool_result entries
     struct ToolResultRef {
         msg_idx: usize,
@@ -169,7 +169,9 @@ impl TranscriptStore {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let path = self.directory.join(format!("transcript_{}.jsonl", timestamp));
+        let path = self
+            .directory
+            .join(format!("transcript_{}.jsonl", timestamp));
         let mut content = String::new();
         for msg in messages {
             content.push_str(&serde_json::to_string(msg).unwrap_or_default());
@@ -187,7 +189,7 @@ impl TranscriptStore {
                 if path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .map_or(false, |n| n.starts_with("transcript_") && n.ends_with(".jsonl"))
+                    .is_some_and(|n| n.starts_with("transcript_") && n.ends_with(".jsonl"))
                 {
                     paths.push(path);
                 }

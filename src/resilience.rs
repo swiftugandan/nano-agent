@@ -133,14 +133,15 @@ impl AuthProfile {
         }
         let now = std::time::Instant::now();
         // Mark current key on cooldown for 60s
-        self.keys[self.current_index].cooldown_until = Some(now + std::time::Duration::from_secs(60));
+        self.keys[self.current_index].cooldown_until =
+            Some(now + std::time::Duration::from_secs(60));
 
         // Find next key not on cooldown
         for offset in 1..self.keys.len() {
             let idx = (self.current_index + offset) % self.keys.len();
             if self.keys[idx]
                 .cooldown_until
-                .map_or(true, |until| now >= until)
+                .is_none_or(|until| now >= until)
             {
                 self.current_index = idx;
                 return true;
@@ -182,7 +183,9 @@ impl ResilientLlm {
         let exp = base * (2.0_f64).powi(attempt as i32);
         let capped = exp.min(self.policy.max_delay_ms as f64);
         // Simple deterministic jitter: reduce by jitter_factor * attempt fraction
-        let jitter = capped * self.policy.jitter_factor * ((attempt as f64 + 1.0) / self.policy.max_attempts as f64);
+        let jitter = capped
+            * self.policy.jitter_factor
+            * ((attempt as f64 + 1.0) / self.policy.max_attempts as f64);
         let delay_ms = (capped + jitter) as u64;
         std::time::Duration::from_millis(delay_ms)
     }

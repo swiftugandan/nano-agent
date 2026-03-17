@@ -1,4 +1,6 @@
-use nano_agent::openai::{translate_messages_outbound, translate_response_inbound, translate_tools_outbound};
+use nano_agent::openai::{
+    translate_messages_outbound, translate_response_inbound, translate_tools_outbound,
+};
 use nano_agent::types::*;
 
 #[test]

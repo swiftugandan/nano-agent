@@ -343,145 +343,174 @@ fn build_extended_dispatch(
     {
         let todo = Arc::clone(&todo);
         let nag = Arc::clone(&nag);
-        dispatch.insert("todo_update".into(), Box::new(move |input| {
-            let items_val = match input.get("items").and_then(|v| v.as_array()) {
-                Some(a) => a,
-                None => return "Error: missing 'items' array".into(),
-            };
-            let items: Vec<TodoItem> = items_val.iter().filter_map(|v| {
-                Some(TodoItem {
-                    id: v.get("id")?.as_str()?.to_string(),
-                    text: v.get("text")?.as_str()?.to_string(),
-                    status: v.get("status")?.as_str()?.to_string(),
-                })
-            }).collect();
-            let mut t = todo.lock().unwrap();
-            match t.update(items) {
-                Ok(rendered) => {
-                    nag.lock().unwrap().reset();
-                    rendered
+        dispatch.insert(
+            "todo_update".into(),
+            Box::new(move |input| {
+                let items_val = match input.get("items").and_then(|v| v.as_array()) {
+                    Some(a) => a,
+                    None => return "Error: missing 'items' array".into(),
+                };
+                let items: Vec<TodoItem> = items_val
+                    .iter()
+                    .filter_map(|v| {
+                        Some(TodoItem {
+                            id: v.get("id")?.as_str()?.to_string(),
+                            text: v.get("text")?.as_str()?.to_string(),
+                            status: v.get("status")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect();
+                let mut t = todo.lock().unwrap();
+                match t.update(items) {
+                    Ok(rendered) => {
+                        nag.lock().unwrap().reset();
+                        rendered
+                    }
+                    Err(e) => format!("Error: {}", e),
                 }
-                Err(e) => format!("Error: {}", e),
-            }
-        }));
+            }),
+        );
     }
 
     // -- L2: todo_read
     {
         let todo = Arc::clone(&todo);
-        dispatch.insert("todo_read".into(), Box::new(move |_| {
-            todo.lock().unwrap().render()
-        }));
+        dispatch.insert(
+            "todo_read".into(),
+            Box::new(move |_| todo.lock().unwrap().render()),
+        );
     }
 
     // -- L4: read_skill
     {
         let loader = Arc::clone(&skill_loader);
-        dispatch.insert("read_skill".into(), Box::new(move |input| {
-            match input.get("name").and_then(|v| v.as_str()) {
-                Some(name) => loader.get_content(name),
-                None => "Error: missing 'name' field".into(),
-            }
-        }));
+        dispatch.insert(
+            "read_skill".into(),
+            Box::new(
+                move |input| match input.get("name").and_then(|v| v.as_str()) {
+                    Some(name) => loader.get_content(name),
+                    None => "Error: missing 'name' field".into(),
+                },
+            ),
+        );
     }
 
     // -- L6: task_create
     {
         let tm = Arc::clone(&task_manager);
-        dispatch.insert("task_create".into(), Box::new(move |input| {
-            match input.get("subject").and_then(|v| v.as_str()) {
-                Some(subject) => tm.lock().unwrap().create(subject),
-                None => "Error: missing 'subject' field".into(),
-            }
-        }));
+        dispatch.insert(
+            "task_create".into(),
+            Box::new(
+                move |input| match input.get("subject").and_then(|v| v.as_str()) {
+                    Some(subject) => tm.lock().unwrap().create(subject),
+                    None => "Error: missing 'subject' field".into(),
+                },
+            ),
+        );
     }
 
     // -- L6: task_get
     {
         let tm = Arc::clone(&task_manager);
-        dispatch.insert("task_get".into(), Box::new(move |input| {
-            match input.get("task_id").and_then(|v| v.as_i64()) {
-                Some(id) => tm.lock().unwrap().get(id),
-                None => "Error: missing 'task_id' field".into(),
-            }
-        }));
+        dispatch.insert(
+            "task_get".into(),
+            Box::new(
+                move |input| match input.get("task_id").and_then(|v| v.as_i64()) {
+                    Some(id) => tm.lock().unwrap().get(id),
+                    None => "Error: missing 'task_id' field".into(),
+                },
+            ),
+        );
     }
 
     // -- L6: task_update
     {
         let tm = Arc::clone(&task_manager);
-        dispatch.insert("task_update".into(), Box::new(move |input| {
-            let task_id = match input.get("task_id").and_then(|v| v.as_i64()) {
-                Some(id) => id,
-                None => return "Error: missing 'task_id' field".into(),
-            };
-            let status = input.get("status").and_then(|v| v.as_str());
-            let blocked_by: Option<Vec<i64>> = input.get("add_blocked_by")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|v| v.as_i64()).collect());
-            let blocks: Option<Vec<i64>> = input.get("add_blocks")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|v| v.as_i64()).collect());
-            let tm = tm.lock().unwrap();
-            match tm.update(
-                task_id,
-                status,
-                blocked_by.as_deref(),
-                blocks.as_deref(),
-            ) {
-                Ok(s) => s,
-                Err(e) => format!("Error: {}", e),
-            }
-        }));
+        dispatch.insert(
+            "task_update".into(),
+            Box::new(move |input| {
+                let task_id = match input.get("task_id").and_then(|v| v.as_i64()) {
+                    Some(id) => id,
+                    None => return "Error: missing 'task_id' field".into(),
+                };
+                let status = input.get("status").and_then(|v| v.as_str());
+                let blocked_by: Option<Vec<i64>> = input
+                    .get("add_blocked_by")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_i64()).collect());
+                let blocks: Option<Vec<i64>> = input
+                    .get("add_blocks")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_i64()).collect());
+                let tm = tm.lock().unwrap();
+                match tm.update(task_id, status, blocked_by.as_deref(), blocks.as_deref()) {
+                    Ok(s) => s,
+                    Err(e) => format!("Error: {}", e),
+                }
+            }),
+        );
     }
 
     // -- L6: task_list
     {
         let tm = Arc::clone(&task_manager);
-        dispatch.insert("task_list".into(), Box::new(move |_| {
-            tm.lock().unwrap().list_all()
-        }));
+        dispatch.insert(
+            "task_list".into(),
+            Box::new(move |_| tm.lock().unwrap().list_all()),
+        );
     }
 
     // -- L7: background_run
     {
         let bg = Arc::clone(&bg);
-        dispatch.insert("background_run".into(), Box::new(move |input| {
-            let cmd = match input.get("command").and_then(|v| v.as_str()) {
-                Some(c) => c,
-                None => return "Error: missing 'command' field".into(),
-            };
-            let lane = input.get("lane").and_then(|v| v.as_str()).unwrap_or("background");
-            bg.lock().unwrap().run_in_lane(lane, cmd)
-        }));
+        dispatch.insert(
+            "background_run".into(),
+            Box::new(move |input| {
+                let cmd = match input.get("command").and_then(|v| v.as_str()) {
+                    Some(c) => c,
+                    None => return "Error: missing 'command' field".into(),
+                };
+                let lane = input
+                    .get("lane")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("background");
+                bg.lock().unwrap().run_in_lane(lane, cmd)
+            }),
+        );
     }
 
     // -- L7: background_check
     {
         let bg = Arc::clone(&bg);
-        dispatch.insert("background_check".into(), Box::new(move |input| {
-            match input.get("task_id").and_then(|v| v.as_str()) {
-                Some(id) => bg.lock().unwrap().check(id),
-                None => "Error: missing 'task_id' field".into(),
-            }
-        }));
+        dispatch.insert(
+            "background_check".into(),
+            Box::new(
+                move |input| match input.get("task_id").and_then(|v| v.as_str()) {
+                    Some(id) => bg.lock().unwrap().check(id),
+                    None => "Error: missing 'task_id' field".into(),
+                },
+            ),
+        );
     }
 
     // -- L8: send_message
     {
         let bus = Arc::clone(&message_bus);
         let name = agent_name.clone();
-        dispatch.insert("send_message".into(), Box::new(move |input| {
-            let to = match input.get("to").and_then(|v| v.as_str()) {
-                Some(t) => t,
-                None => return "Error: missing 'to' field".into(),
-            };
-            let content = match input.get("content").and_then(|v| v.as_str()) {
-                Some(c) => c,
-                None => return "Error: missing 'content' field".into(),
-            };
-            bus.send(&name, to, content)
-        }));
+        dispatch.insert(
+            "send_message".into(),
+            Box::new(move |input| {
+                let to = match input.get("to").and_then(|v| v.as_str()) {
+                    Some(t) => t,
+                    None => return "Error: missing 'to' field".into(),
+                };
+                let content = match input.get("content").and_then(|v| v.as_str()) {
+                    Some(c) => c,
+                    None => return "Error: missing 'content' field".into(),
+                };
+                bus.send(&name, to, content)
+            }),
+        );
     }
 
     // -- L8: broadcast_message
@@ -489,36 +518,44 @@ fn build_extended_dispatch(
         let bus = Arc::clone(&message_bus);
         let tm_mgr = Arc::clone(&teammate_manager);
         let name = agent_name.clone();
-        dispatch.insert("broadcast_message".into(), Box::new(move |input| {
-            let content = match input.get("content").and_then(|v| v.as_str()) {
-                Some(c) => c,
-                None => return "Error: missing 'content' field".into(),
-            };
-            let names = tm_mgr.lock().unwrap().member_names();
-            bus.broadcast(&name, content, &names)
-        }));
+        dispatch.insert(
+            "broadcast_message".into(),
+            Box::new(move |input| {
+                let content = match input.get("content").and_then(|v| v.as_str()) {
+                    Some(c) => c,
+                    None => return "Error: missing 'content' field".into(),
+                };
+                let names = tm_mgr.lock().unwrap().member_names();
+                bus.broadcast(&name, content, &names)
+            }),
+        );
     }
 
     // -- L8: read_inbox
     {
         let bus = Arc::clone(&message_bus);
         let name = agent_name.clone();
-        dispatch.insert("read_inbox".into(), Box::new(move |_| {
-            let msgs = bus.read_inbox(&name);
-            if msgs.is_empty() {
-                "No messages.".into()
-            } else {
-                serde_json::to_string_pretty(&msgs).unwrap_or_else(|_| "Error reading inbox".into())
-            }
-        }));
+        dispatch.insert(
+            "read_inbox".into(),
+            Box::new(move |_| {
+                let msgs = bus.read_inbox(&name);
+                if msgs.is_empty() {
+                    "No messages.".into()
+                } else {
+                    serde_json::to_string_pretty(&msgs)
+                        .unwrap_or_else(|_| "Error reading inbox".into())
+                }
+            }),
+        );
     }
 
     // -- L8: list_teammates
     {
         let tm_mgr = Arc::clone(&teammate_manager);
-        dispatch.insert("list_teammates".into(), Box::new(move |_| {
-            tm_mgr.lock().unwrap().list_all()
-        }));
+        dispatch.insert(
+            "list_teammates".into(),
+            Box::new(move |_| tm_mgr.lock().unwrap().list_all()),
+        );
     }
 
     // -- L8: spawn_teammate (with real lifecycle thread)
@@ -537,142 +574,159 @@ fn build_extended_dispatch(
         let todo_mgr = Arc::clone(&todo);
         let nag_pol = Arc::clone(&nag);
         let hb_mgr = Arc::clone(&heartbeat_manager);
-        dispatch.insert("spawn_teammate".into(), Box::new(move |input| {
-            let name = match input.get("name").and_then(|v| v.as_str()) {
-                Some(n) => n.to_string(),
-                None => return "Error: missing 'name'".into(),
-            };
-            let role = match input.get("role").and_then(|v| v.as_str()) {
-                Some(r) => r.to_string(),
-                None => return "Error: missing 'role'".into(),
-            };
-            let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
-                Some(p) => p.to_string(),
-                None => return "Error: missing 'prompt'".into(),
-            };
+        dispatch.insert(
+            "spawn_teammate".into(),
+            Box::new(move |input| {
+                let name = match input.get("name").and_then(|v| v.as_str()) {
+                    Some(n) => n.to_string(),
+                    None => return "Error: missing 'name'".into(),
+                };
+                let role = match input.get("role").and_then(|v| v.as_str()) {
+                    Some(r) => r.to_string(),
+                    None => return "Error: missing 'role'".into(),
+                };
+                let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
+                    Some(p) => p.to_string(),
+                    None => return "Error: missing 'prompt'".into(),
+                };
 
-            // Register teammate
-            let result = tm_mgr.lock().unwrap().spawn(&name, &role, &prompt);
-            if result.starts_with("Error") {
-                return result;
-            }
+                // Register teammate
+                let result = tm_mgr.lock().unwrap().spawn(&name, &role, &prompt);
+                if result.starts_with("Error") {
+                    return result;
+                }
 
-            // Clone everything needed for the thread
-            let tm_mgr_t = Arc::clone(&tm_mgr);
-            let bus_t = Arc::clone(&bus);
-            let tasks_d_t = tasks_d.clone();
-            let transcript_d_t = transcript_d.clone();
-            let backend_t = backend.clone();
-            let cwd_t = cwd.clone();
-            let sk_loader_t = Arc::clone(&sk_loader);
-            let t_manager_t = Arc::clone(&t_manager);
-            let bg_mgr_t = Arc::clone(&bg_mgr);
-            let req_tracker_t = Arc::clone(&req_tracker);
-            let ev_bus_t = Arc::clone(&ev_bus);
-            let todo_mgr_t = Arc::clone(&todo_mgr);
-            let nag_pol_t = Arc::clone(&nag_pol);
-            let hb_mgr_t = Arc::clone(&hb_mgr);
-            let name_t = name.clone();
-            let role_t = role.clone();
-            let prompt_t = prompt.clone();
+                // Clone everything needed for the thread
+                let tm_mgr_t = Arc::clone(&tm_mgr);
+                let bus_t = Arc::clone(&bus);
+                let tasks_d_t = tasks_d.clone();
+                let transcript_d_t = transcript_d.clone();
+                let backend_t = backend.clone();
+                let cwd_t = cwd.clone();
+                let sk_loader_t = Arc::clone(&sk_loader);
+                let t_manager_t = Arc::clone(&t_manager);
+                let bg_mgr_t = Arc::clone(&bg_mgr);
+                let req_tracker_t = Arc::clone(&req_tracker);
+                let ev_bus_t = Arc::clone(&ev_bus);
+                let todo_mgr_t = Arc::clone(&todo_mgr);
+                let nag_pol_t = Arc::clone(&nag_pol);
+                let hb_mgr_t = Arc::clone(&hb_mgr);
+                let name_t = name.clone();
+                let role_t = role.clone();
+                let prompt_t = prompt.clone();
 
-            std::thread::spawn(move || {
-                let inner_llm = create_llm(&backend_t);
-                let policy = RetryPolicy::from_env();
-                let auth_prefix = if backend_t == "openai" { "OPENROUTER_API_KEY" } else { "ANTHROPIC_API_KEY" };
-                let auth = AuthProfile::from_env(auth_prefix);
-                let mut llm_box: Box<dyn Llm> = Box::new(ResilientLlm::new(inner_llm, policy, auth));
+                std::thread::spawn(move || {
+                    let inner_llm = create_llm(&backend_t);
+                    let policy = RetryPolicy::from_env();
+                    let auth_prefix = if backend_t == "openai" {
+                        "OPENROUTER_API_KEY"
+                    } else {
+                        "ANTHROPIC_API_KEY"
+                    };
+                    let auth = AuthProfile::from_env(auth_prefix);
+                    let mut llm_box: Box<dyn Llm> =
+                        Box::new(ResilientLlm::new(inner_llm, policy, auth));
 
-                // Build tool defs + dispatch for the teammate
-                let mut tool_defs = tools::tool_definitions();
-                tool_defs.extend(extended_tool_definitions());
+                    // Build tool defs + dispatch for the teammate
+                    let mut tool_defs = tools::tool_definitions();
+                    tool_defs.extend(extended_tool_definitions());
 
-                // Teammates only need idle_signal (compact is handled by lifecycle)
-                let teammate_compact = Arc::new(CompactSignal::new());
-                let teammate_idle = Arc::new(AtomicBool::new(false));
+                    // Teammates only need idle_signal (compact is handled by lifecycle)
+                    let teammate_compact = Arc::new(CompactSignal::new());
+                    let teammate_idle = Arc::new(AtomicBool::new(false));
 
-                let mut dispatch = tools::build_dispatch(&cwd_t);
-                let extended = build_extended_dispatch(
-                    todo_mgr_t,
-                    nag_pol_t,
-                    sk_loader_t,
-                    t_manager_t,
-                    bg_mgr_t,
-                    Arc::clone(&bus_t),
-                    Arc::clone(&tm_mgr_t),
-                    req_tracker_t,
-                    ev_bus_t,
-                    hb_mgr_t,
-                    cwd_t,
-                    tasks_d_t.clone(),
-                    name_t.clone(),
-                    backend_t,
-                    teammate_compact,
-                    Arc::clone(&teammate_idle),
-                );
-                dispatch.extend(extended);
+                    let mut dispatch = tools::build_dispatch(&cwd_t);
+                    let extended = build_extended_dispatch(
+                        todo_mgr_t,
+                        nag_pol_t,
+                        sk_loader_t,
+                        t_manager_t,
+                        bg_mgr_t,
+                        Arc::clone(&bus_t),
+                        Arc::clone(&tm_mgr_t),
+                        req_tracker_t,
+                        ev_bus_t,
+                        hb_mgr_t,
+                        cwd_t,
+                        tasks_d_t.clone(),
+                        name_t.clone(),
+                        backend_t,
+                        teammate_compact,
+                        Arc::clone(&teammate_idle),
+                    );
+                    dispatch.extend(extended);
 
-                let system = format!(
-                    "You are '{}', a teammate agent (role: {}). Your initial task:\n{}\n\n\
+                    let system = format!(
+                        "You are '{}', a teammate agent (role: {}). Your initial task:\n{}\n\n\
                      When you finish your current work, call the `idle` tool to enter idle mode \
                      and wait for new tasks or messages.",
-                    name_t, role_t, prompt_t
-                );
+                        name_t, role_t, prompt_t
+                    );
 
-                let mut messages = vec![serde_json::json!({
-                    "role": "user",
-                    "content": prompt_t,
-                })];
+                    let mut messages = vec![serde_json::json!({
+                        "role": "user",
+                        "content": prompt_t,
+                    })];
 
-                let ctx = autonomy::LifecycleContext {
-                    teammate_manager: tm_mgr_t,
-                    message_bus: bus_t,
-                    tasks_dir: tasks_d_t,
-                    transcript_dir: transcript_d_t,
-                    agent_name: name_t,
-                };
-                let config = autonomy::LifecycleConfig::default();
-                autonomy::run_teammate_lifecycle(
-                    llm_box.as_mut(),
-                    &system,
-                    &mut messages,
-                    &tool_defs,
-                    &dispatch,
-                    &ctx,
-                    &teammate_idle,
-                    &config,
-                );
-            });
+                    let ctx = autonomy::LifecycleContext {
+                        teammate_manager: tm_mgr_t,
+                        message_bus: bus_t,
+                        tasks_dir: tasks_d_t,
+                        transcript_dir: transcript_d_t,
+                        agent_name: name_t,
+                    };
+                    let config = autonomy::LifecycleConfig::default();
+                    autonomy::run_teammate_lifecycle(
+                        llm_box.as_mut(),
+                        &system,
+                        &mut messages,
+                        &tool_defs,
+                        &dispatch,
+                        &ctx,
+                        &teammate_idle,
+                        &config,
+                    );
+                });
 
-            result
-        }));
+                result
+            }),
+        );
     }
 
     // -- L9: shutdown_teammate
     {
         let tracker = Arc::clone(&request_tracker);
         let bus = Arc::clone(&message_bus);
-        dispatch.insert("shutdown_teammate".into(), Box::new(move |input| {
-            match input.get("teammate").and_then(|v| v.as_str()) {
-                Some(t) => tracker.handle_shutdown_request(&bus, t),
-                None => "Error: missing 'teammate' field".into(),
-            }
-        }));
+        dispatch.insert(
+            "shutdown_teammate".into(),
+            Box::new(
+                move |input| match input.get("teammate").and_then(|v| v.as_str()) {
+                    Some(t) => tracker.handle_shutdown_request(&bus, t),
+                    None => "Error: missing 'teammate' field".into(),
+                },
+            ),
+        );
     }
 
     // -- L9: review_plan
     {
         let tracker = Arc::clone(&request_tracker);
         let bus = Arc::clone(&message_bus);
-        dispatch.insert("review_plan".into(), Box::new(move |input| {
-            let req_id = match input.get("request_id").and_then(|v| v.as_str()) {
-                Some(r) => r,
-                None => return "Error: missing 'request_id'".into(),
-            };
-            let approve = input.get("approve").and_then(|v| v.as_bool()).unwrap_or(false);
-            let feedback = input.get("feedback").and_then(|v| v.as_str()).unwrap_or("");
-            tracker.handle_plan_review(&bus, req_id, approve, feedback)
-        }));
+        dispatch.insert(
+            "review_plan".into(),
+            Box::new(move |input| {
+                let req_id = match input.get("request_id").and_then(|v| v.as_str()) {
+                    Some(r) => r,
+                    None => return "Error: missing 'request_id'".into(),
+                };
+                let approve = input
+                    .get("approve")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let feedback = input.get("feedback").and_then(|v| v.as_str()).unwrap_or("");
+                tracker.handle_plan_review(&bus, req_id, approve, feedback)
+            }),
+        );
     }
 
     // -- L11: worktree_create
@@ -680,19 +734,22 @@ fn build_extended_dispatch(
         let tm = Arc::clone(&task_manager);
         let eb = Arc::clone(&event_bus);
         let root = repo_root.clone();
-        dispatch.insert("worktree_create".into(), Box::new(move |input| {
-            let name = match input.get("name").and_then(|v| v.as_str()) {
-                Some(n) => n,
-                None => return "Error: missing 'name'".into(),
-            };
-            let task_id = input.get("task_id").and_then(|v| v.as_i64());
-            let tm_guard = tm.lock().unwrap();
-            let wm = WorktreeManager::new(&root, &tm_guard, &eb);
-            match wm.create_with_task(name, task_id) {
-                Ok(s) => s,
-                Err(e) => format!("Error: {}", e),
-            }
-        }));
+        dispatch.insert(
+            "worktree_create".into(),
+            Box::new(move |input| {
+                let name = match input.get("name").and_then(|v| v.as_str()) {
+                    Some(n) => n,
+                    None => return "Error: missing 'name'".into(),
+                };
+                let task_id = input.get("task_id").and_then(|v| v.as_i64());
+                let tm_guard = tm.lock().unwrap();
+                let wm = WorktreeManager::new(&root, &tm_guard, &eb);
+                match wm.create_with_task(name, task_id) {
+                    Ok(s) => s,
+                    Err(e) => format!("Error: {}", e),
+                }
+            }),
+        );
     }
 
     // -- L11: worktree_remove
@@ -700,75 +757,93 @@ fn build_extended_dispatch(
         let tm = Arc::clone(&task_manager);
         let eb = Arc::clone(&event_bus);
         let root = repo_root.clone();
-        dispatch.insert("worktree_remove".into(), Box::new(move |input| {
-            let name = match input.get("name").and_then(|v| v.as_str()) {
-                Some(n) => n,
-                None => return "Error: missing 'name'".into(),
-            };
-            let complete = input.get("complete_task").and_then(|v| v.as_bool()).unwrap_or(false);
-            let tm_guard = tm.lock().unwrap();
-            let wm = WorktreeManager::new(&root, &tm_guard, &eb);
-            match wm.remove_with_options(name, complete) {
-                Ok(s) => s,
-                Err(e) => format!("Error: {}", e),
-            }
-        }));
+        dispatch.insert(
+            "worktree_remove".into(),
+            Box::new(move |input| {
+                let name = match input.get("name").and_then(|v| v.as_str()) {
+                    Some(n) => n,
+                    None => return "Error: missing 'name'".into(),
+                };
+                let complete = input
+                    .get("complete_task")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let tm_guard = tm.lock().unwrap();
+                let wm = WorktreeManager::new(&root, &tm_guard, &eb);
+                match wm.remove_with_options(name, complete) {
+                    Ok(s) => s,
+                    Err(e) => format!("Error: {}", e),
+                }
+            }),
+        );
     }
 
     // -- L11: list_events
     {
         let eb = Arc::clone(&event_bus);
-        dispatch.insert("list_events".into(), Box::new(move |input| {
-            let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-            eb.list_recent(limit)
-        }));
+        dispatch.insert(
+            "list_events".into(),
+            Box::new(move |input| {
+                let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                eb.list_recent(limit)
+            }),
+        );
     }
 
     // -- L10: scan_tasks
     {
         let dir = tasks_dir.clone();
-        dispatch.insert("scan_tasks".into(), Box::new(move |_| {
-            let tasks = autonomy::scan_unclaimed_tasks(&dir);
-            if tasks.is_empty() {
-                "No unclaimed tasks.".into()
-            } else {
-                serde_json::to_string_pretty(&tasks).unwrap_or_else(|_| "Error".into())
-            }
-        }));
+        dispatch.insert(
+            "scan_tasks".into(),
+            Box::new(move |_| {
+                let tasks = autonomy::scan_unclaimed_tasks(&dir);
+                if tasks.is_empty() {
+                    "No unclaimed tasks.".into()
+                } else {
+                    serde_json::to_string_pretty(&tasks).unwrap_or_else(|_| "Error".into())
+                }
+            }),
+        );
     }
 
     // -- L10: claim_task
     {
         let dir = tasks_dir.clone();
         let name = agent_name.clone();
-        dispatch.insert("claim_task".into(), Box::new(move |input| {
-            match input.get("task_id").and_then(|v| v.as_i64()) {
-                Some(id) => autonomy::claim_task(&dir, id, &name),
-                None => "Error: missing 'task_id'".into(),
-            }
-        }));
+        dispatch.insert(
+            "claim_task".into(),
+            Box::new(
+                move |input| match input.get("task_id").and_then(|v| v.as_i64()) {
+                    Some(id) => autonomy::claim_task(&dir, id, &name),
+                    None => "Error: missing 'task_id'".into(),
+                },
+            ),
+        );
     }
 
     // -- L3: subagent
     {
         let backend = llm_backend;
         let cwd = repo_root;
-        dispatch.insert("subagent".into(), Box::new(move |input| {
-            let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => return "Error: missing 'prompt'".into(),
-            };
-            let mut child_llm = create_llm(&backend);
-            let child_tool_defs = child_tools();
-            let child_dispatch = tools::build_dispatch(&cwd);
-            SubagentFactory::spawn(
-                child_llm.as_mut(),
-                prompt,
-                &child_tool_defs,
-                &child_dispatch,
-                10,
-            )
-        }));
+        dispatch.insert(
+            "subagent".into(),
+            Box::new(move |input| {
+                let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
+                    Some(p) => p,
+                    None => return "Error: missing 'prompt'".into(),
+                };
+                let mut child_llm = create_llm(&backend);
+                let child_tool_defs = child_tools();
+                let child_dispatch = tools::build_dispatch(&cwd);
+                SubagentFactory::spawn(
+                    child_llm.as_mut(),
+                    prompt,
+                    child_tool_defs,
+                    &child_dispatch,
+                    10,
+                )
+            }),
+        );
     }
 
     // -- compact tool handler
@@ -783,49 +858,56 @@ fn build_extended_dispatch(
     // -- idle tool handler
     {
         let signal = idle_signal;
-        dispatch.insert("idle".into(), Box::new(move |_| {
-            signal.store(true, Ordering::Release);
-            "Transitioning to idle phase. You will be woken when new work arrives.".into()
-        }));
+        dispatch.insert(
+            "idle".into(),
+            Box::new(move |_| {
+                signal.store(true, Ordering::Release);
+                "Transitioning to idle phase. You will be woken when new work arrives.".into()
+            }),
+        );
     }
 
     // -- cron_add
     {
         let hb = Arc::clone(&heartbeat_manager);
-        dispatch.insert("cron_add".into(), Box::new(move |input| {
-            let name = match input.get("name").and_then(|v| v.as_str()) {
-                Some(n) => n,
-                None => return "Error: missing 'name'".into(),
-            };
-            let cron = match input.get("cron").and_then(|v| v.as_str()) {
-                Some(c) => c,
-                None => return "Error: missing 'cron'".into(),
-            };
-            let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => return "Error: missing 'prompt'".into(),
-            };
-            hb.add_cron(name, cron, prompt)
-        }));
+        dispatch.insert(
+            "cron_add".into(),
+            Box::new(move |input| {
+                let name = match input.get("name").and_then(|v| v.as_str()) {
+                    Some(n) => n,
+                    None => return "Error: missing 'name'".into(),
+                };
+                let cron = match input.get("cron").and_then(|v| v.as_str()) {
+                    Some(c) => c,
+                    None => return "Error: missing 'cron'".into(),
+                };
+                let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
+                    Some(p) => p,
+                    None => return "Error: missing 'prompt'".into(),
+                };
+                hb.add_cron(name, cron, prompt)
+            }),
+        );
     }
 
     // -- cron_remove
     {
         let hb = Arc::clone(&heartbeat_manager);
-        dispatch.insert("cron_remove".into(), Box::new(move |input| {
-            match input.get("name").and_then(|v| v.as_str()) {
-                Some(name) => hb.remove_cron(name),
-                None => "Error: missing 'name'".into(),
-            }
-        }));
+        dispatch.insert(
+            "cron_remove".into(),
+            Box::new(
+                move |input| match input.get("name").and_then(|v| v.as_str()) {
+                    Some(name) => hb.remove_cron(name),
+                    None => "Error: missing 'name'".into(),
+                },
+            ),
+        );
     }
 
     // -- cron_list
     {
         let hb = Arc::clone(&heartbeat_manager);
-        dispatch.insert("cron_list".into(), Box::new(move |_| {
-            hb.list_crons()
-        }));
+        dispatch.insert("cron_list".into(), Box::new(move |_| hb.list_crons()));
     }
 
     dispatch
@@ -848,14 +930,20 @@ fn main() {
             let model = llm.model.clone();
             let policy = RetryPolicy::from_env();
             let auth = AuthProfile::from_env("OPENROUTER_API_KEY");
-            (Box::new(ResilientLlm::new(Box::new(llm), policy, auth)), model)
+            (
+                Box::new(ResilientLlm::new(Box::new(llm), policy, auth)),
+                model,
+            )
         }
         _ => {
             let llm = AnthropicLlm::from_env();
             let model = llm.model.clone();
             let policy = RetryPolicy::from_env();
             let auth = AuthProfile::from_env("ANTHROPIC_API_KEY");
-            (Box::new(ResilientLlm::new(Box::new(llm), policy, auth)), model)
+            (
+                Box::new(ResilientLlm::new(Box::new(llm), policy, auth)),
+                model,
+            )
         }
     };
 
@@ -895,7 +983,10 @@ fn main() {
     prompt_assembler.init_defaults();
 
     // -- Register self as a teammate
-    teammate_manager.lock().unwrap().spawn(&agent_name, &agent_role, "primary agent");
+    teammate_manager
+        .lock()
+        .unwrap()
+        .spawn(&agent_name, &agent_role, "primary agent");
     // Pre-warm: list team (ensures config is written)
     let _ = teammate_manager.lock().unwrap().list_all();
 
@@ -932,9 +1023,18 @@ fn main() {
     // -- Startup banner
     println!("╔══════════════════════════════════════════════╗");
     println!("║  nano-agent v0.1.0                          ║");
-    println!("║  backend: {:35}║", format!("{} ({})", backend, model_name));
-    println!("║  agent:   {:35}║", format!("{} [{}]", agent_name, agent_role));
-    println!("║  tools:   {:35}║", format!("{} registered", tool_defs.len()));
+    println!(
+        "║  backend: {:35}║",
+        format!("{} ({})", backend, model_name)
+    );
+    println!(
+        "║  agent:   {:35}║",
+        format!("{} [{}]", agent_name, agent_role)
+    );
+    println!(
+        "║  tools:   {:35}║",
+        format!("{} registered", tool_defs.len())
+    );
     println!("╚══════════════════════════════════════════════╝");
     println!();
     println!("Commands: /quit  /clear  /status  /tasks  /team  /events");
@@ -1014,11 +1114,8 @@ fn main() {
             memory::micro_compact(&mut messages);
         }
         if token_count > memory::THRESHOLD {
-            let (new_msgs, path) = memory::auto_compact(
-                &messages,
-                llm_box.as_mut(),
-                &transcript_dir,
-            );
+            let (new_msgs, path) =
+                memory::auto_compact(&messages, llm_box.as_mut(), &transcript_dir);
             messages = new_msgs;
             println!("[compact] Saved transcript: {}", path.display());
         }
@@ -1043,8 +1140,16 @@ fn main() {
         {
             let notifs = background_manager.lock().unwrap().drain_notifications();
             if !notifs.is_empty() {
-                let text: Vec<String> = notifs.iter()
-                    .map(|n| format!("[Background {} {}]: {}", n.task_id, n.status, n.result.trim()))
+                let text: Vec<String> = notifs
+                    .iter()
+                    .map(|n| {
+                        format!(
+                            "[Background {} {}]: {}",
+                            n.task_id,
+                            n.status,
+                            n.result.trim()
+                        )
+                    })
                     .collect();
                 messages.push(serde_json::json!({"role": "user", "content": text.join("\n")}));
             }
@@ -1063,9 +1168,11 @@ fn main() {
         {
             let events = heartbeat_manager.drain_events();
             if !events.is_empty() {
-                let text = events.iter()
+                let text = events
+                    .iter()
                     .map(|e| format!("[Cron '{}' fired]: {}", e.name, e.prompt))
-                    .collect::<Vec<_>>().join("\n");
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 messages.push(serde_json::json!({"role": "user", "content": text}));
             }
         }
@@ -1078,8 +1185,16 @@ fn main() {
             agent_role: agent_role.clone(),
             cwd: cwd.display().to_string(),
             tool_count: tool_defs.len(),
-            todo_state: if todo_state.is_empty() { "(empty)".into() } else { todo_state },
-            skill_descriptions: if skill_desc.is_empty() { "(none loaded)".into() } else { skill_desc },
+            todo_state: if todo_state.is_empty() {
+                "(empty)".into()
+            } else {
+                todo_state
+            },
+            skill_descriptions: if skill_desc.is_empty() {
+                "(none loaded)".into()
+            } else {
+                skill_desc
+            },
         });
 
         // -- Run the agent loop

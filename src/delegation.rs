@@ -7,7 +7,7 @@ static CHILD_TOOL_NAMES: OnceLock<Vec<String>> = OnceLock::new();
 
 /// Get child tools derived from tool_definitions (parsed once).
 pub fn child_tools() -> &'static Vec<serde_json::Value> {
-    CHILD_TOOLS.get_or_init(|| tool_definitions())
+    CHILD_TOOLS.get_or_init(tool_definitions)
 }
 
 /// Get child tool names (computed once).

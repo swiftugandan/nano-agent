@@ -16,6 +16,12 @@ pub struct TodoManager {
     pub items: Vec<TodoItem>,
 }
 
+impl Default for TodoManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TodoManager {
     pub fn new() -> Self {
         Self { items: Vec::new() }
@@ -74,7 +80,11 @@ impl TodoManager {
                 format!("{} #{}: {}", marker, item.id, item.text)
             })
             .collect();
-        let done = self.items.iter().filter(|i| i.status == "completed").count();
+        let done = self
+            .items
+            .iter()
+            .filter(|i| i.status == "completed")
+            .count();
         lines.push(format!("\n({}/{} completed)", done, self.items.len()));
         lines.join("\n")
     }

@@ -57,7 +57,7 @@ impl EventBus {
     }
 
     pub fn list_recent(&self, limit: usize) -> String {
-        let n = limit.max(1).min(200);
+        let n = limit.clamp(1, 200);
         let content = std::fs::read_to_string(&self.log_path).unwrap_or_default();
         let lines: Vec<&str> = content.lines().collect();
         let start = if lines.len() > n { lines.len() - n } else { 0 };
@@ -185,9 +185,10 @@ impl<'a> WorktreeManager<'a> {
         name: &str,
         task_id: Option<i64>,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        self.validate_name(name).map_err(|e| -> Box<dyn std::error::Error> {
-            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-        })?;
+        self.validate_name(name)
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+            })?;
 
         if self.find(name).is_some() {
             return Err(format!("Worktree '{}' already exists in index", name).into());

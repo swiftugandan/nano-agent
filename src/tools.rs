@@ -308,7 +308,8 @@ pub fn build_dispatch(workspace: &Path) -> Dispatch {
                                     let stderr_data = stderr_handle.join().unwrap_or_default();
                                     let stdout = String::from_utf8_lossy(&stdout_data);
                                     let stderr = String::from_utf8_lossy(&stderr_data);
-                                    let mut result = format!("Error: command timed out after {}s", secs);
+                                    let mut result =
+                                        format!("Error: command timed out after {}s", secs);
                                     if !stdout.is_empty() {
                                         result.push_str("\n[stdout] ");
                                         result.push_str(&stdout);
@@ -325,16 +326,14 @@ pub fn build_dispatch(workspace: &Path) -> Dispatch {
                         }
                     }
                 }
-                None => {
-                    match child.wait_with_output() {
-                        Ok(output) => {
-                            let stdout = String::from_utf8_lossy(&output.stdout);
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            format_command_output(&stdout, &stderr, output.status.code())
-                        }
-                        Err(e) => format!("Error waiting for process: {}", e),
+                None => match child.wait_with_output() {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        format_command_output(&stdout, &stderr, output.status.code())
                     }
-                }
+                    Err(e) => format!("Error waiting for process: {}", e),
+                },
             }
         }),
     );
@@ -354,8 +353,16 @@ pub fn build_dispatch(workspace: &Path) -> Dispatch {
             };
             match std::fs::read_to_string(&resolved) {
                 Ok(contents) => {
-                    let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
-                    let limit = input.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(usize::MAX);
+                    let offset = input
+                        .get("offset")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(1)
+                        .max(1) as usize;
+                    let limit = input
+                        .get("limit")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize)
+                        .unwrap_or(usize::MAX);
                     contents
                         .lines()
                         .skip(offset - 1)
@@ -457,10 +464,18 @@ pub fn build_dispatch(workspace: &Path) -> Dispatch {
                 .arg("--line-number")
                 .arg("--color=never");
 
-            if input.get("ignore_case").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if input
+                .get("ignore_case")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 cmd.arg("-i");
             }
-            if input.get("literal").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if input
+                .get("literal")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 cmd.arg("--fixed-strings");
             }
             if let Some(ctx) = input.get("context").and_then(|v| v.as_u64()) {

@@ -205,7 +205,7 @@ impl TeammateManager {
 
     pub fn is_shutdown_requested(&self, name: &str) -> bool {
         self.find_member(name)
-            .map_or(false, |m| m.status == "shutdown")
+            .is_some_and(|m| m.status == "shutdown")
     }
 
     fn save_config(&self) {

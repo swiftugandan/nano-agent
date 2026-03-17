@@ -33,7 +33,8 @@ pub fn run_agent_loop(
             Ok(r) => r,
             Err(LlmError::Overflow { message }) => {
                 // Attempt compaction and continue
-                if let (Some(signal), Some(_dir)) = (signals.compact_signal, signals.transcript_dir) {
+                if let (Some(signal), Some(_dir)) = (signals.compact_signal, signals.transcript_dir)
+                {
                     signal.request();
                 }
                 messages.push(serde_json::json!({

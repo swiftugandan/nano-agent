@@ -62,10 +62,9 @@ fn test_l10_02_auto_claims_unclaimed_unblocked_pending() {
     assert!(result.contains("worker1"));
 
     // Verify task is now claimed
-    let updated: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(tasks_dir.join("task_1.json")).unwrap(),
-    )
-    .unwrap();
+    let updated: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(tasks_dir.join("task_1.json")).unwrap())
+            .unwrap();
     assert_eq!(updated["owner"].as_str().unwrap(), "worker1");
     assert_eq!(updated["status"].as_str().unwrap(), "in_progress");
 }

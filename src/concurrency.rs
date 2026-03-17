@@ -191,15 +191,30 @@ pub struct BackgroundManager {
     notification_queue: Arc<Mutex<Vec<Notification>>>,
 }
 
+impl Default for BackgroundManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BackgroundManager {
     pub fn new() -> Self {
         let all_tasks = Arc::new(Mutex::new(HashMap::new()));
         let notification_queue = Arc::new(Mutex::new(Vec::new()));
 
         let default_lanes = vec![
-            LaneConfig { name: LANE_MAIN.to_string(), max_concurrency: 1 },
-            LaneConfig { name: LANE_CRON.to_string(), max_concurrency: 1 },
-            LaneConfig { name: LANE_BACKGROUND.to_string(), max_concurrency: 4 },
+            LaneConfig {
+                name: LANE_MAIN.to_string(),
+                max_concurrency: 1,
+            },
+            LaneConfig {
+                name: LANE_CRON.to_string(),
+                max_concurrency: 1,
+            },
+            LaneConfig {
+                name: LANE_BACKGROUND.to_string(),
+                max_concurrency: 4,
+            },
         ];
 
         let mut lanes = HashMap::new();
@@ -207,7 +222,11 @@ impl BackgroundManager {
             let name = config.name.clone();
             lanes.insert(
                 name,
-                Arc::new(Lane::new(config, Arc::clone(&all_tasks), Arc::clone(&notification_queue))),
+                Arc::new(Lane::new(
+                    config,
+                    Arc::clone(&all_tasks),
+                    Arc::clone(&notification_queue),
+                )),
             );
         }
 
@@ -241,7 +260,12 @@ impl BackgroundManager {
             }
         }
 
-        format!("Background task {} started in '{}': {}", task_id, lane, truncate_str(command, 80))
+        format!(
+            "Background task {} started in '{}': {}",
+            task_id,
+            lane,
+            truncate_str(command, 80)
+        )
     }
 
     /// Backwards-compatible: run in the "background" lane.

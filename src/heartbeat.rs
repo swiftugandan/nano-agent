@@ -11,7 +11,7 @@ use std::thread;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronEntry {
     pub name: String,
-    pub cron: String,       // "*/5 * * * *"
+    pub cron: String, // "*/5 * * * *"
     pub prompt: String,
     pub enabled: bool,
 }
@@ -39,7 +39,7 @@ fn field_matches(field: &str, value: u32) -> bool {
     }
     if let Some(step) = field.strip_prefix("*/") {
         if let Ok(n) = step.parse::<u32>() {
-            return n > 0 && value % n == 0;
+            return n > 0 && value.is_multiple_of(n);
         }
     }
     if let Ok(specific) = field.parse::<u32>() {
@@ -212,14 +212,12 @@ impl HeartbeatManager {
         let scheduler = Arc::clone(&self.scheduler);
         let pending = Arc::clone(&self.pending);
 
-        thread::spawn(move || {
-            loop {
-                thread::sleep(std::time::Duration::from_secs(30));
-                let events = scheduler.tick();
-                if !events.is_empty() {
-                    let mut p = pending.lock().unwrap();
-                    p.extend(events);
-                }
+        thread::spawn(move || loop {
+            thread::sleep(std::time::Duration::from_secs(30));
+            let events = scheduler.tick();
+            if !events.is_empty() {
+                let mut p = pending.lock().unwrap();
+                p.extend(events);
             }
         });
     }

@@ -6,7 +6,6 @@
 use nano_agent::autonomy;
 use nano_agent::concurrency::BackgroundManager;
 use nano_agent::core_loop::{run_agent_loop, PathSandbox};
-use nano_agent::types::LoopSignals;
 use nano_agent::delegation::SubagentFactory;
 use nano_agent::isolation::{EventBus, WorktreeManager};
 use nano_agent::knowledge::SkillLoader;
@@ -16,6 +15,7 @@ use nano_agent::planning::{NagPolicy, TodoItem, TodoManager};
 use nano_agent::protocols::RequestTracker;
 use nano_agent::tasks::{Task, TaskManager};
 use nano_agent::teams::{MessageBus, TeammateManager};
+use nano_agent::types::LoopSignals;
 use nano_agent::types::*;
 
 use std::collections::HashMap;
@@ -53,15 +53,21 @@ fn scenario_01_loop_with_planning_nag() {
     // Agent does 4 turns of tool work without touching todo
     let mut llm = MockLLM::new();
     for i in 0..3 {
-        llm.queue("tool_use", vec![make_tool_use_block(&format!("c{}", i), "bash", serde_json::json!({"command": "echo hi"}))]);
+        llm.queue(
+            "tool_use",
+            vec![make_tool_use_block(
+                &format!("c{}", i),
+                "bash",
+                serde_json::json!({"command": "echo hi"}),
+            )],
+        );
     }
     llm.queue("end_turn", vec![make_text_block("done")]);
 
     let dispatch = echo_dispatch();
     let tools: Vec<serde_json::Value> = vec![];
-    let mut messages: Vec<serde_json::Value> = vec![
-        serde_json::json!({"role": "user", "content": "implement feature X"}),
-    ];
+    let mut messages: Vec<serde_json::Value> =
+        vec![serde_json::json!({"role": "user", "content": "implement feature X"})];
 
     // Simulate ticks alongside agent loop
     let mut nag_fired = false;
@@ -73,33 +79,61 @@ fn scenario_01_loop_with_planning_nag() {
     }
 
     // Nag should have fired after tick 3
-    assert!(nag_fired, "NagPolicy should fire after 3 ticks without todo use");
+    assert!(
+        nag_fired,
+        "NagPolicy should fire after 3 ticks without todo use"
+    );
 
     // Run agent loop
-    let calls = run_agent_loop(&mut llm, "system", &mut messages, &tools, &dispatch, &LoopSignals::none());
+    let calls = run_agent_loop(
+        &mut llm,
+        "system",
+        &mut messages,
+        &tools,
+        &dispatch,
+        &LoopSignals::none(),
+    );
     assert_eq!(calls, 4);
 
     // Verify todo manager rejects bad states
-    let items_ok = vec![
-        TodoItem { id: "1".into(), text: "task A".into(), status: "in_progress".into() },
-    ];
+    let items_ok = vec![TodoItem {
+        id: "1".into(),
+        text: "task A".into(),
+        status: "in_progress".into(),
+    }];
     assert!(todo.update(items_ok).is_ok());
 
     let items_bad = vec![
-        TodoItem { id: "1".into(), text: "task A".into(), status: "in_progress".into() },
-        TodoItem { id: "2".into(), text: "task B".into(), status: "in_progress".into() },
+        TodoItem {
+            id: "1".into(),
+            text: "task A".into(),
+            status: "in_progress".into(),
+        },
+        TodoItem {
+            id: "2".into(),
+            text: "task B".into(),
+            status: "in_progress".into(),
+        },
     ];
-    assert!(todo.update(items_bad).is_err(), "only one in_progress allowed");
+    assert!(
+        todo.update(items_bad).is_err(),
+        "only one in_progress allowed"
+    );
 
-    let items_empty = vec![
-        TodoItem { id: "1".into(), text: "".into(), status: "pending".into() },
-    ];
+    let items_empty = vec![TodoItem {
+        id: "1".into(),
+        text: "".into(),
+        status: "pending".into(),
+    }];
     assert!(todo.update(items_empty).is_err(), "empty content rejected");
 
     // Using todo resets the nag
     nag.reset();
     nag.tick();
-    assert!(!nag.should_inject(), "nag should not fire right after reset");
+    assert!(
+        !nag.should_inject(),
+        "nag should not fire right after reset"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -115,9 +149,16 @@ fn scenario_02_delegation_with_tool_use() {
     let mut child_llm = MockLLM::new();
     child_llm.queue(
         "tool_use",
-        vec![make_tool_use_block("t1", "read_file", serde_json::json!({"path": "data.txt"}))],
+        vec![make_tool_use_block(
+            "t1",
+            "read_file",
+            serde_json::json!({"path": "data.txt"}),
+        )],
     );
-    child_llm.queue("end_turn", vec![make_text_block("The file contains secret=42")]);
+    child_llm.queue(
+        "end_turn",
+        vec![make_text_block("The file contains secret=42")],
+    );
 
     let tools = nano_agent::delegation::child_tools();
     let mut h = HashMap::new();
@@ -132,8 +173,14 @@ fn scenario_02_delegation_with_tool_use() {
         5,
     );
 
-    assert!(result.contains("secret=42"), "subagent should return file content summary");
-    assert!(!result.contains("tool_use"), "internal tool calls should not leak");
+    assert!(
+        result.contains("secret=42"),
+        "subagent should return file content summary"
+    );
+    assert!(
+        !result.contains("tool_use"),
+        "internal tool calls should not leak"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -172,17 +219,32 @@ fn scenario_03_skill_injection_into_system_prompt() {
 
     // System prompt uses compact descriptions
     let descriptions = loader.get_descriptions();
-    assert!(descriptions.contains("testing"), "should list testing skill");
-    assert!(descriptions.contains("code-review"), "should list review skill");
-    assert!(!descriptions.contains("Always run"), "body should NOT be in descriptions");
+    assert!(
+        descriptions.contains("testing"),
+        "should list testing skill"
+    );
+    assert!(
+        descriptions.contains("code-review"),
+        "should list review skill"
+    );
+    assert!(
+        !descriptions.contains("Always run"),
+        "body should NOT be in descriptions"
+    );
 
     // When agent needs a skill, load full content
     let content = loader.get_content("testing");
-    assert!(content.contains("cargo test"), "full body should be available");
+    assert!(
+        content.contains("cargo test"),
+        "full body should be available"
+    );
 
     // Unknown skill gives helpful error
     let err = loader.get_content("unknown-skill");
-    assert!(err.contains("Error"), "should return error for unknown skill");
+    assert!(
+        err.contains("Error"),
+        "should return error for unknown skill"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -237,17 +299,32 @@ fn scenario_04_memory_compaction_pipeline() {
             }
         }
     }
-    assert_eq!(full_results, memory::KEEP_RECENT, "should keep KEEP_RECENT most recent tool results");
-    assert_eq!(placeholders, 20 - memory::KEEP_RECENT, "should replace older tool results");
+    assert_eq!(
+        full_results,
+        memory::KEEP_RECENT,
+        "should keep KEEP_RECENT most recent tool results"
+    );
+    assert_eq!(
+        placeholders,
+        20 - memory::KEEP_RECENT,
+        "should replace older tool results"
+    );
 
     // Step 2: Auto-compact produces exactly 2 messages and saves transcript
     let mut summary_llm = MockLLM::new();
     summary_llm.queue(
         "end_turn",
-        vec![make_text_block("Summary: 20 questions about various topics were asked.")],
+        vec![make_text_block(
+            "Summary: 20 questions about various topics were asked.",
+        )],
     );
-    let (result, transcript_path) = memory::auto_compact(&messages, &mut summary_llm, &transcript_dir);
-    assert_eq!(result.len(), 2, "auto-compact returns user + assistant summary");
+    let (result, transcript_path) =
+        memory::auto_compact(&messages, &mut summary_llm, &transcript_dir);
+    assert_eq!(
+        result.len(),
+        2,
+        "auto-compact returns user + assistant summary"
+    );
     assert_eq!(result[0]["role"], "user");
     assert_eq!(result[1]["role"], "assistant");
     assert!(transcript_path.exists(), "transcript should be saved");
@@ -315,7 +392,10 @@ fn scenario_05_task_lifecycle_with_worktree() {
     // Complete T1 — should unblock T2
     tm.update_status(t1, "completed").unwrap();
     let task2_after: Task = serde_json::from_str(&tm.get(t2)).unwrap();
-    assert!(task2_after.blocked_by.is_empty(), "T2 should be unblocked after T1 completed");
+    assert!(
+        task2_after.blocked_by.is_empty(),
+        "T2 should be unblocked after T1 completed"
+    );
 
     // T2 is now claimable, T3 still blocked
     let claimable2 = autonomy::scan_unclaimed_tasks(&tasks_dir);
@@ -328,8 +408,14 @@ fn scenario_05_task_lifecycle_with_worktree() {
 
     // Verify events were emitted
     let events = fs::read_to_string(&events_path).unwrap();
-    assert!(events.contains("worktree.create.before"), "lifecycle events should be emitted");
-    assert!(events.contains("worktree.create.after"), "lifecycle events should be emitted");
+    assert!(
+        events.contains("worktree.create.before"),
+        "lifecycle events should be emitted"
+    );
+    assert!(
+        events.contains("worktree.create.after"),
+        "lifecycle events should be emitted"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -369,12 +455,14 @@ fn scenario_06_background_tasks_feed_loop() {
 
     // Second drain should be empty (atomic drain)
     let notes2 = bg.drain_notifications();
-    assert!(notes2.is_empty(), "drain should be atomic — second call empty");
+    assert!(
+        notes2.is_empty(),
+        "drain should be atomic — second call empty"
+    );
 
     // Inject results as tool_result messages (simulating what the agent loop does)
-    let mut messages: Vec<serde_json::Value> = vec![
-        serde_json::json!({"role": "user", "content": "process the files"}),
-    ];
+    let mut messages: Vec<serde_json::Value> =
+        vec![serde_json::json!({"role": "user", "content": "process the files"})];
     for note in &notes {
         messages.push(serde_json::json!({
             "role": "user",
@@ -385,7 +473,10 @@ fn scenario_06_background_tasks_feed_loop() {
             }],
         }));
     }
-    assert!(messages.len() >= 3, "background results should be in message history");
+    assert!(
+        messages.len() >= 3,
+        "background results should be in message history"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -444,11 +535,17 @@ fn scenario_08_team_delegation() {
     // Specialist reads inbox
     let inbox = bus.read_inbox("specialist");
     assert_eq!(inbox.len(), 1);
-    assert!(inbox[0]["content"].as_str().unwrap().contains("analyze data.csv"));
+    assert!(inbox[0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("analyze data.csv"));
 
     // Specialist spawns subagent to do the work
     let mut child_llm = MockLLM::new();
-    child_llm.queue("end_turn", vec![make_text_block("Analysis complete: 100 rows, 5 columns")]);
+    child_llm.queue(
+        "end_turn",
+        vec![make_text_block("Analysis complete: 100 rows, 5 columns")],
+    );
 
     let tools = nano_agent::delegation::child_tools();
     let dispatch = empty_dispatch();
@@ -467,7 +564,10 @@ fn scenario_08_team_delegation() {
     // Coordinator reads the result
     let coord_inbox = bus.read_inbox("coordinator");
     assert_eq!(coord_inbox.len(), 1);
-    assert!(coord_inbox[0]["content"].as_str().unwrap().contains("Analysis complete"));
+    assert!(coord_inbox[0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("Analysis complete"));
 }
 
 // ---------------------------------------------------------------------------
@@ -532,9 +632,8 @@ fn scenario_09_autonomous_task_pickup() {
     assert!(content.contains("developer"));
 
     // Should inject when messages are fresh (<=3)
-    let short_messages: Vec<serde_json::Value> = vec![
-        serde_json::json!({"role": "user", "content": "start"}),
-    ];
+    let short_messages: Vec<serde_json::Value> =
+        vec![serde_json::json!({"role": "user", "content": "start"})];
     assert!(autonomy::should_inject(&short_messages));
 
     let long_messages: Vec<serde_json::Value> = (0..5)
@@ -563,11 +662,14 @@ fn scenario_10_plan_approval_flow() {
     let req_id = "plan-001".to_string();
     {
         let mut reqs = tracker.plan_requests.lock().unwrap();
-        reqs.insert(req_id.clone(), nano_agent::protocols::PlanRequest {
-            from: "agent-1".to_string(),
-            plan: "Refactor auth module, add OAuth2, update tests".to_string(),
-            status: "pending".to_string(),
-        });
+        reqs.insert(
+            req_id.clone(),
+            nano_agent::protocols::PlanRequest {
+                from: "agent-1".to_string(),
+                plan: "Refactor auth module, add OAuth2, update tests".to_string(),
+                status: "pending".to_string(),
+            },
+        );
     }
 
     // Lead reviews and approves the plan
@@ -583,7 +685,10 @@ fn scenario_10_plan_approval_flow() {
     // Agent-1 reads approval response from inbox
     let agent_inbox = bus.read_inbox("agent-1");
     assert_eq!(agent_inbox.len(), 1);
-    assert_eq!(agent_inbox[0]["type"].as_str().unwrap(), "plan_approval_response");
+    assert_eq!(
+        agent_inbox[0]["type"].as_str().unwrap(),
+        "plan_approval_response"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -599,9 +704,12 @@ fn scenario_11_long_session_with_compaction_and_planning() {
 
     // Set up todo tracking
     let mut todo = TodoManager::new();
-    todo.update(vec![
-        TodoItem { id: "1".into(), text: "Set up project structure".into(), status: "in_progress".into() },
-    ]).unwrap();
+    todo.update(vec![TodoItem {
+        id: "1".into(),
+        text: "Set up project structure".into(),
+        status: "in_progress".into(),
+    }])
+    .unwrap();
 
     // Build a conversation that would trigger compaction (more than KEEP_RECENT tool results)
     let tool_count = memory::KEEP_RECENT + 5;
@@ -644,14 +752,27 @@ fn scenario_11_long_session_with_compaction_and_planning() {
             }
         }
     }
-    assert_eq!(full_count, memory::KEEP_RECENT, "keep KEEP_RECENT full results");
+    assert_eq!(
+        full_count,
+        memory::KEEP_RECENT,
+        "keep KEEP_RECENT full results"
+    );
     assert_eq!(placeholder_count, 5, "5 old results should be placeholders");
 
     // Update todo progress
     todo.update(vec![
-        TodoItem { id: "1".into(), text: "Set up project structure".into(), status: "completed".into() },
-        TodoItem { id: "2".into(), text: "Implement core logic".into(), status: "in_progress".into() },
-    ]).unwrap();
+        TodoItem {
+            id: "1".into(),
+            text: "Set up project structure".into(),
+            status: "completed".into(),
+        },
+        TodoItem {
+            id: "2".into(),
+            text: "Implement core logic".into(),
+            status: "in_progress".into(),
+        },
+    ])
+    .unwrap();
 
     // Save transcript
     let store = memory::TranscriptStore::new(dir.path());
@@ -686,11 +807,18 @@ fn scenario_12_background_with_team_notification() {
     assert!(notes[0].result.contains("BUILD_OK"));
 
     // Notify team of build result
-    bus.send("builder", "deployer", &format!("Build completed: {}", notes[0].result.trim()));
+    bus.send(
+        "builder",
+        "deployer",
+        &format!("Build completed: {}", notes[0].result.trim()),
+    );
 
     let deployer_inbox = bus.read_inbox("deployer");
     assert_eq!(deployer_inbox.len(), 1);
-    assert!(deployer_inbox[0]["content"].as_str().unwrap().contains("BUILD_OK"));
+    assert!(deployer_inbox[0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("BUILD_OK"));
 }
 
 // ---------------------------------------------------------------------------
@@ -740,7 +868,10 @@ fn scenario_13_worktree_safety_and_events() {
     // Events should contain lifecycle markers
     let events = fs::read_to_string(&events_path).unwrap();
     let event_lines: Vec<&str> = events.lines().collect();
-    assert!(event_lines.len() >= 4, "should have create.before, create.after, remove.before, remove.after");
+    assert!(
+        event_lines.len() >= 4,
+        "should have create.before, create.after, remove.before, remove.after"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -774,7 +905,9 @@ fn scenario_14_skill_informed_delegation() {
     let mut child_llm = MockLLM::new();
     child_llm.queue(
         "end_turn",
-        vec![make_text_block("Deployment complete. Health checks passed.")],
+        vec![make_text_block(
+            "Deployment complete. Health checks passed.",
+        )],
     );
 
     let tools = nano_agent::delegation::child_tools();
@@ -844,7 +977,10 @@ fn scenario_15_multi_agent_task_queue() {
     bus.broadcast("agent-A", "Task 0 is done!", &names);
     let bcast = bus.read_inbox("agent-B");
     assert_eq!(bcast.len(), 1);
-    assert!(bcast[0]["content"].as_str().unwrap().contains("Task 0 is done"));
+    assert!(bcast[0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("Task 0 is done"));
 }
 
 // ---------------------------------------------------------------------------
@@ -892,17 +1028,43 @@ fn scenario_17_planning_with_task_tracking() {
     let _t3: Task = serde_json::from_str(&tm.create("Write tests")).unwrap();
 
     todo.update(vec![
-        TodoItem { id: "1".into(), text: "Design API schema".into(), status: "in_progress".into() },
-        TodoItem { id: "2".into(), text: "Implement endpoints".into(), status: "pending".into() },
-        TodoItem { id: "3".into(), text: "Write tests".into(), status: "pending".into() },
-    ]).unwrap();
+        TodoItem {
+            id: "1".into(),
+            text: "Design API schema".into(),
+            status: "in_progress".into(),
+        },
+        TodoItem {
+            id: "2".into(),
+            text: "Implement endpoints".into(),
+            status: "pending".into(),
+        },
+        TodoItem {
+            id: "3".into(),
+            text: "Write tests".into(),
+            status: "pending".into(),
+        },
+    ])
+    .unwrap();
 
     // Complete first item, start second
     todo.update(vec![
-        TodoItem { id: "1".into(), text: "Design API schema".into(), status: "completed".into() },
-        TodoItem { id: "2".into(), text: "Implement endpoints".into(), status: "in_progress".into() },
-        TodoItem { id: "3".into(), text: "Write tests".into(), status: "pending".into() },
-    ]).unwrap();
+        TodoItem {
+            id: "1".into(),
+            text: "Design API schema".into(),
+            status: "completed".into(),
+        },
+        TodoItem {
+            id: "2".into(),
+            text: "Implement endpoints".into(),
+            status: "in_progress".into(),
+        },
+        TodoItem {
+            id: "3".into(),
+            text: "Write tests".into(),
+            status: "pending".into(),
+        },
+    ])
+    .unwrap();
     tm.update_status(t1.id, "completed").unwrap();
     tm.update_status(t2.id, "in_progress").unwrap();
 
@@ -914,9 +1076,21 @@ fn scenario_17_planning_with_task_tracking() {
 
     // Can't have two in-progress todos
     let bad_update = todo.update(vec![
-        TodoItem { id: "1".into(), text: "Design API schema".into(), status: "completed".into() },
-        TodoItem { id: "2".into(), text: "Implement endpoints".into(), status: "in_progress".into() },
-        TodoItem { id: "3".into(), text: "Write tests".into(), status: "in_progress".into() },
+        TodoItem {
+            id: "1".into(),
+            text: "Design API schema".into(),
+            status: "completed".into(),
+        },
+        TodoItem {
+            id: "2".into(),
+            text: "Implement endpoints".into(),
+            status: "in_progress".into(),
+        },
+        TodoItem {
+            id: "3".into(),
+            text: "Write tests".into(),
+            status: "in_progress".into(),
+        },
     ]);
     assert!(bad_update.is_err());
 }
@@ -933,17 +1107,27 @@ fn scenario_18_token_estimation() {
     // ~4 chars per token is the heuristic (operates on serialized JSON)
     let short_msgs = vec![serde_json::json!({"role": "user", "content": "hello"})];
     let short_tokens = memory::estimate_tokens(&short_msgs);
-    assert!(short_tokens > 0 && short_tokens < 50, "short message should be few tokens: got {}", short_tokens);
+    assert!(
+        short_tokens > 0 && short_tokens < 50,
+        "short message should be few tokens: got {}",
+        short_tokens
+    );
 
     // Large conversation
     let big_msgs: Vec<serde_json::Value> = (0..100)
-        .map(|i| serde_json::json!({
-            "role": "user",
-            "content": format!("{}: {}", i, "word ".repeat(50)),
-        }))
+        .map(|i| {
+            serde_json::json!({
+                "role": "user",
+                "content": format!("{}: {}", i, "word ".repeat(50)),
+            })
+        })
         .collect();
     let big_tokens = memory::estimate_tokens(&big_msgs);
-    assert!(big_tokens > 5000, "100 messages with 50 words should be many tokens: got {}", big_tokens);
+    assert!(
+        big_tokens > 5000,
+        "100 messages with 50 words should be many tokens: got {}",
+        big_tokens
+    );
 
     // Verify threshold constant is accessible
     assert!(memory::THRESHOLD > 0);
@@ -964,27 +1148,63 @@ fn scenario_19_full_session_simulation() {
     let mut llm = MockLLM::new();
 
     // Turn 1: Agent reads a file
-    llm.queue("tool_use", vec![make_tool_use_block("c1", "read_file", serde_json::json!({"path": "config.json"}))]);
+    llm.queue(
+        "tool_use",
+        vec![make_tool_use_block(
+            "c1",
+            "read_file",
+            serde_json::json!({"path": "config.json"}),
+        )],
+    );
     // Turn 2: Agent runs a command
-    llm.queue("tool_use", vec![make_tool_use_block("c2", "bash", serde_json::json!({"command": "echo test"}))]);
+    llm.queue(
+        "tool_use",
+        vec![make_tool_use_block(
+            "c2",
+            "bash",
+            serde_json::json!({"command": "echo test"}),
+        )],
+    );
     // Turn 3: Agent writes a file
-    llm.queue("tool_use", vec![make_tool_use_block("c3", "write_file", serde_json::json!({"path": "out.txt", "content": "result"}))]);
+    llm.queue(
+        "tool_use",
+        vec![make_tool_use_block(
+            "c3",
+            "write_file",
+            serde_json::json!({"path": "out.txt", "content": "result"}),
+        )],
+    );
     // Turn 4: Final response
-    llm.queue("end_turn", vec![make_text_block("Task complete. Created out.txt with results.")]);
+    llm.queue(
+        "end_turn",
+        vec![make_text_block(
+            "Task complete. Created out.txt with results.",
+        )],
+    );
 
     let dispatch = echo_dispatch();
     let tools: Vec<serde_json::Value> = vec![];
-    let mut messages: Vec<serde_json::Value> = vec![
-        serde_json::json!({"role": "user", "content": "Process config and create output"}),
-    ];
+    let mut messages: Vec<serde_json::Value> =
+        vec![serde_json::json!({"role": "user", "content": "Process config and create output"})];
 
-    let calls = run_agent_loop(&mut llm, "You are a helper.", &mut messages, &tools, &dispatch, &LoopSignals::none());
+    let calls = run_agent_loop(
+        &mut llm,
+        "You are a helper.",
+        &mut messages,
+        &tools,
+        &dispatch,
+        &LoopSignals::none(),
+    );
 
     // Should have made 4 LLM calls (3 tool_use + 1 end_turn)
     assert_eq!(calls, 4);
 
     // Messages should contain the full conversation
-    assert!(messages.len() >= 8, "should have user + 4 assistant + 3 tool_result messages, got {}", messages.len());
+    assert!(
+        messages.len() >= 8,
+        "should have user + 4 assistant + 3 tool_result messages, got {}",
+        messages.len()
+    );
 
     // Last message should be assistant with final text
     let last = messages.last().unwrap();
@@ -1042,11 +1262,15 @@ fn scenario_20_complete_project_workflow() {
     let req_id = "pr-001".to_string();
     {
         let mut reqs = tracker.plan_requests.lock().unwrap();
-        reqs.insert(req_id.clone(), nano_agent::protocols::PlanRequest {
-            from: "dev-agent".to_string(),
-            plan: "1) Create auth middleware  2) Add JWT validation  3) Write tests".to_string(),
-            status: "pending".to_string(),
-        });
+        reqs.insert(
+            req_id.clone(),
+            nano_agent::protocols::PlanRequest {
+                from: "dev-agent".to_string(),
+                plan: "1) Create auth middleware  2) Add JWT validation  3) Write tests"
+                    .to_string(),
+                status: "pending".to_string(),
+            },
+        );
     }
     tracker.handle_plan_review(&msg_bus, &req_id, true, "Approved. Go ahead.");
 
@@ -1104,9 +1328,8 @@ fn scenario_21_resilience_retry_then_succeed() {
         AuthProfile::empty(),
     ));
 
-    let mut messages: Vec<serde_json::Value> = vec![
-        serde_json::json!({"role": "user", "content": "hello"}),
-    ];
+    let mut messages: Vec<serde_json::Value> =
+        vec![serde_json::json!({"role": "user", "content": "hello"})];
     let tools: Vec<serde_json::Value> = vec![];
     let dispatch = empty_dispatch();
 
@@ -1142,7 +1365,10 @@ fn scenario_22_overflow_triggers_compaction() {
     mock.queue_error(LlmError::Overflow {
         message: "context too long".into(),
     });
-    mock.queue("end_turn", vec![make_text_block("Recovered after compaction")]);
+    mock.queue(
+        "end_turn",
+        vec![make_text_block("Recovered after compaction")],
+    );
 
     let policy = RetryPolicy {
         max_attempts: 1,
@@ -1163,9 +1389,8 @@ fn scenario_22_overflow_triggers_compaction() {
         idle_signal: None,
     };
 
-    let mut messages: Vec<serde_json::Value> = vec![
-        serde_json::json!({"role": "user", "content": "process a very long context"}),
-    ];
+    let mut messages: Vec<serde_json::Value> =
+        vec![serde_json::json!({"role": "user", "content": "process a very long context"})];
     let tools: Vec<serde_json::Value> = vec![];
     let dispatch = empty_dispatch();
 
@@ -1221,9 +1446,8 @@ fn scenario_23_fatal_error_stops_loop() {
         AuthProfile::empty(),
     ));
 
-    let mut messages: Vec<serde_json::Value> = vec![
-        serde_json::json!({"role": "user", "content": "hello"}),
-    ];
+    let mut messages: Vec<serde_json::Value> =
+        vec![serde_json::json!({"role": "user", "content": "hello"})];
     let tools: Vec<serde_json::Value> = vec![];
     let dispatch = empty_dispatch();
 
@@ -1279,19 +1503,40 @@ fn scenario_24_prompt_assembly_with_skills_and_todos() {
 
     // Placeholder substitution works
     assert!(prompt.contains("alpha"), "agent name should be substituted");
-    assert!(prompt.contains("architect"), "agent role should be substituted");
-    assert!(prompt.contains("/project/root"), "cwd should be substituted");
+    assert!(
+        prompt.contains("architect"),
+        "agent role should be substituted"
+    );
+    assert!(
+        prompt.contains("/project/root"),
+        "cwd should be substituted"
+    );
     assert!(prompt.contains("34"), "tool count should be substituted");
 
     // Dynamic sections injected after TOOLS.md
-    assert!(prompt.contains("Current Todo List"), "todo section should be present");
+    assert!(
+        prompt.contains("Current Todo List"),
+        "todo section should be present"
+    );
     assert!(prompt.contains("Implement API"), "todo items should appear");
-    assert!(prompt.contains("Available Skills"), "skills section should be present");
-    assert!(prompt.contains("testing"), "skill descriptions should appear");
-    assert!(prompt.contains("deploy"), "skill descriptions should appear");
+    assert!(
+        prompt.contains("Available Skills"),
+        "skills section should be present"
+    );
+    assert!(
+        prompt.contains("testing"),
+        "skill descriptions should appear"
+    );
+    assert!(
+        prompt.contains("deploy"),
+        "skill descriptions should appear"
+    );
 
     // Guidelines still appear after the dynamic sections
-    assert!(prompt.contains("Guidelines"), "guidelines should be present");
+    assert!(
+        prompt.contains("Guidelines"),
+        "guidelines should be present"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1333,9 +1578,15 @@ fn scenario_25_prompt_hot_reload() {
 
     assembler.reload();
     let prompt_v2 = assembler.compose(&ctx);
-    assert!(prompt_v2.contains("security auditor"), "reloaded prompt should reflect edit");
+    assert!(
+        prompt_v2.contains("security auditor"),
+        "reloaded prompt should reflect edit"
+    );
     assert!(prompt_v2.contains("bot"), "placeholders still substituted");
-    assert!(!prompt_v2.contains("autonomous coding agent"), "old content should be gone");
+    assert!(
+        !prompt_v2.contains("autonomous coding agent"),
+        "old content should be gone"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1416,9 +1667,15 @@ fn scenario_27_lane_reset_cancels_queued() {
     let results: Vec<String> = notes.iter().map(|n| n.result.clone()).collect();
 
     // The first task (already running) should complete
-    assert!(results.iter().any(|r| r.contains("first")), "running task should complete");
+    assert!(
+        results.iter().any(|r| r.contains("first")),
+        "running task should complete"
+    );
     // Post-reset task should complete
-    assert!(results.iter().any(|r| r.contains("post-reset")), "post-reset task should run");
+    assert!(
+        results.iter().any(|r| r.contains("post-reset")),
+        "post-reset task should run"
+    );
     // Cancelled tasks should NOT appear (or at most appear but the key point is post-reset works)
     // Note: the cancelled tasks may or may not have been dequeued depending on timing,
     // but the post-reset task must have run.
@@ -1453,7 +1710,10 @@ fn scenario_28_heartbeat_cron_lifecycle() {
 
     // Tick the scheduler — "health" (every minute) should fire
     let events = hb.scheduler().tick();
-    assert!(events.iter().any(|e| e.name == "health"), "health cron should fire");
+    assert!(
+        events.iter().any(|e| e.name == "health"),
+        "health cron should fire"
+    );
 
     // Remove health entry
     let rm = hb.remove_cron("health");
@@ -1465,7 +1725,10 @@ fn scenario_28_heartbeat_cron_lifecycle() {
     // Verify persistence — reload from disk
     let hb2 = HeartbeatManager::new(&config);
     let list3 = hb2.list_crons();
-    assert!(!list3.contains("health"), "removed entry should not persist");
+    assert!(
+        !list3.contains("health"),
+        "removed entry should not persist"
+    );
     assert!(list3.contains("metrics"), "remaining entry should persist");
 }
 
@@ -1488,9 +1751,16 @@ fn scenario_29_resilient_subagent_delegation() {
     });
     mock.queue(
         "tool_use",
-        vec![make_tool_use_block("t1", "read_file", serde_json::json!({"path": "data.txt"}))],
+        vec![make_tool_use_block(
+            "t1",
+            "read_file",
+            serde_json::json!({"path": "data.txt"}),
+        )],
     );
-    mock.queue("end_turn", vec![make_text_block("File contains: important data")]);
+    mock.queue(
+        "end_turn",
+        vec![make_text_block("File contains: important data")],
+    );
 
     let policy = RetryPolicy {
         max_attempts: 3,
@@ -1580,7 +1850,10 @@ fn scenario_30_full_new_features_integration() {
         status: 429,
         message: "rate limited".into(),
     });
-    mock.queue("end_turn", vec![make_text_block("Integration test passed!")]);
+    mock.queue(
+        "end_turn",
+        vec![make_text_block("Integration test passed!")],
+    );
 
     let policy = RetryPolicy {
         max_attempts: 3,
@@ -1594,9 +1867,8 @@ fn scenario_30_full_new_features_integration() {
         AuthProfile::empty(),
     ));
 
-    let mut messages: Vec<serde_json::Value> = vec![
-        serde_json::json!({"role": "user", "content": "run integration test"}),
-    ];
+    let mut messages: Vec<serde_json::Value> =
+        vec![serde_json::json!({"role": "user", "content": "run integration test"})];
 
     // Inject background results (as the main loop would)
     for note in &notes {

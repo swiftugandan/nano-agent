@@ -11,12 +11,10 @@ pub struct AnthropicLlm {
 impl AnthropicLlm {
     pub fn from_env() -> Self {
         Self {
-            api_key: env::var("ANTHROPIC_API_KEY")
-                .expect("ANTHROPIC_API_KEY must be set"),
+            api_key: env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY must be set"),
             base_url: env::var("ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|_| "https://api.anthropic.com".to_string()),
-            model: env::var("MODEL_ID")
-                .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string()),
+            model: env::var("MODEL_ID").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string()),
         }
     }
 }
@@ -46,13 +44,12 @@ impl Llm for AnthropicLlm {
 
         match resp {
             Ok(response) => {
-                let json: serde_json::Value = response.into_json()
+                let json: serde_json::Value = response
+                    .into_json()
                     .expect("Failed to parse Anthropic response as JSON");
 
-                let content: Vec<ContentBlock> = serde_json::from_value(
-                    json["content"].clone(),
-                )
-                .expect("Failed to parse Anthropic content blocks");
+                let content: Vec<ContentBlock> = serde_json::from_value(json["content"].clone())
+                    .expect("Failed to parse Anthropic content blocks");
 
                 let stop_reason = json["stop_reason"]
                     .as_str()
@@ -68,7 +65,9 @@ impl Llm for AnthropicLlm {
                 let body = response.into_string().unwrap_or_default();
                 Err(crate::resilience::classify_error(code, &body))
             }
-            Err(e) => Err(LlmError::Fatal { message: e.to_string() }),
+            Err(e) => Err(LlmError::Fatal {
+                message: e.to_string(),
+            }),
         }
     }
 }

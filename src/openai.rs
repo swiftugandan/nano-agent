@@ -12,8 +12,7 @@ pub struct OpenAiLlm {
 impl OpenAiLlm {
     pub fn from_env() -> Self {
         Self {
-            api_key: env::var("OPENROUTER_API_KEY")
-                .expect("OPENROUTER_API_KEY must be set"),
+            api_key: env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY must be set"),
             base_url: env::var("OPENROUTER_BASE_URL")
                 .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string()),
             model: env::var("OPENROUTER_MODEL")
@@ -56,10 +55,7 @@ struct OaiFunction {
 // -- Format translation --
 
 /// Convert Anthropic-format messages to OpenAI-format messages.
-pub fn translate_messages_outbound(
-    system: &str,
-    messages: &[Message],
-) -> Vec<serde_json::Value> {
+pub fn translate_messages_outbound(system: &str, messages: &[Message]) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
 
     // System message
@@ -163,8 +159,7 @@ pub fn translate_tools_outbound(tools: &[serde_json::Value]) -> Vec<serde_json::
 
 /// Parse an OpenAI response into our Anthropic-style types.
 pub fn translate_response_inbound(json: serde_json::Value) -> LlmResponse {
-    let oai: OaiResponse =
-        serde_json::from_value(json).expect("Failed to parse OpenAI response");
+    let oai: OaiResponse = serde_json::from_value(json).expect("Failed to parse OpenAI response");
 
     let choice = &oai.choices[0];
     let mut content = Vec::new();
@@ -232,7 +227,9 @@ impl Llm for OpenAiLlm {
                 let body = response.into_string().unwrap_or_default();
                 Err(crate::resilience::classify_error(code, &body))
             }
-            Err(e) => Err(LlmError::Fatal { message: e.to_string() }),
+            Err(e) => Err(LlmError::Fatal {
+                message: e.to_string(),
+            }),
         }
     }
 }

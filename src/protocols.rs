@@ -24,6 +24,12 @@ pub struct RequestTracker {
     pub plan_requests: Mutex<HashMap<String, PlanRequest>>,
 }
 
+impl Default for RequestTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RequestTracker {
     pub fn new() -> Self {
         Self {

@@ -30,10 +30,7 @@ fn test_l3_02_returns_only_final_text() {
     llm.queue("end_turn", vec![make_text_block("Final summary.")]);
 
     let mut dispatch: Dispatch = HashMap::new();
-    dispatch.insert(
-        "bash".to_string(),
-        Box::new(|_| "hi".to_string()),
-    );
+    dispatch.insert("bash".to_string(), Box::new(|_| "hi".to_string()));
 
     let tools = child_tools();
     let result = SubagentFactory::spawn(&mut llm, "Test", &tools, &dispatch, 30);
@@ -46,11 +43,13 @@ fn test_l3_02_returns_only_final_text() {
 #[test]
 fn test_l3_03_context_does_not_leak_to_parent() {
     // Simulate what parent does when subagent tool is called
-    let mut parent_messages = vec![serde_json::json!({"role": "user", "content": "Parent context"})];
+    let mut parent_messages =
+        vec![serde_json::json!({"role": "user", "content": "Parent context"})];
     let initial_len = parent_messages.len();
 
     // Parent: assistant with tool_use + user with tool_result = +2
-    parent_messages.push(serde_json::json!({"role": "assistant", "content": "tool_use placeholder"}));
+    parent_messages
+        .push(serde_json::json!({"role": "assistant", "content": "tool_use placeholder"}));
     parent_messages.push(serde_json::json!({
         "role": "user",
         "content": [{"type": "tool_result", "tool_use_id": "tu_1", "content": "Subagent summary"}],
@@ -83,10 +82,7 @@ fn test_l3_05_respects_iteration_limit() {
     }
 
     let mut dispatch: Dispatch = HashMap::new();
-    dispatch.insert(
-        "bash".to_string(),
-        Box::new(|_| "echoed".to_string()),
-    );
+    dispatch.insert("bash".to_string(), Box::new(|_| "echoed".to_string()));
 
     let tools = child_tools();
     SubagentFactory::spawn(&mut llm, "Infinite loop", &tools, &dispatch, max_iterations);

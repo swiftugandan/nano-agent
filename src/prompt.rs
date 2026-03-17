@@ -36,7 +36,13 @@ impl PromptAssembler {
     /// Load all layer files from the prompts directory.
     fn load(&mut self) {
         self.layers.clear();
-        let layer_files = ["SOUL.md", "IDENTITY.md", "TOOLS.md", "GUIDELINES.md", "MEMORY.md"];
+        let layer_files = [
+            "SOUL.md",
+            "IDENTITY.md",
+            "TOOLS.md",
+            "GUIDELINES.md",
+            "MEMORY.md",
+        ];
         for filename in &layer_files {
             let path = self.prompts_dir.join(filename);
             if let Ok(content) = fs::read_to_string(&path) {

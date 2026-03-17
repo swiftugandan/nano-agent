@@ -76,8 +76,8 @@ impl TaskManager {
 
     fn save(&self, task: &Task) -> Result<(), AgentError> {
         let path = self.task_path(task.id);
-        let content =
-            serde_json::to_string_pretty(task).map_err(|e| AgentError::ValueError(e.to_string()))?;
+        let content = serde_json::to_string_pretty(task)
+            .map_err(|e| AgentError::ValueError(e.to_string()))?;
         std::fs::write(&path, content)?;
         Ok(())
     }

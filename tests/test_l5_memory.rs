@@ -2,7 +2,11 @@ use nano_agent::memory::*;
 use nano_agent::mock::*;
 use nano_agent::types::*;
 
-fn make_tool_exchange(tool_name: &str, tool_id: &str, result_content: &str) -> (serde_json::Value, serde_json::Value) {
+fn make_tool_exchange(
+    tool_name: &str,
+    tool_id: &str,
+    result_content: &str,
+) -> (serde_json::Value, serde_json::Value) {
     let assistant_msg = serde_json::json!({
         "role": "assistant",
         "content": [{
@@ -98,9 +102,7 @@ fn test_l5_02_placeholders_not_empty() {
     assert!(!placeholders.is_empty());
     for p in placeholders {
         assert!(!p.is_empty());
-        assert!(
-            p.to_lowercase().contains("used") || p.to_lowercase().contains("previous")
-        );
+        assert!(p.to_lowercase().contains("used") || p.to_lowercase().contains("previous"));
     }
 }
 

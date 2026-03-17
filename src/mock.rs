@@ -7,6 +7,12 @@ pub struct MockLLM {
     calls: Vec<LlmParams>,
 }
 
+impl Default for MockLLM {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockLLM {
     pub fn new() -> Self {
         Self {

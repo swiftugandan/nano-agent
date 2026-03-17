@@ -1,6 +1,12 @@
 use nano_agent::knowledge::*;
 
-fn create_skill(skills_dir: &std::path::Path, name: &str, description: &str, body: &str, tags: &str) {
+fn create_skill(
+    skills_dir: &std::path::Path,
+    name: &str,
+    description: &str,
+    body: &str,
+    tags: &str,
+) {
     let skill_dir = skills_dir.join(name);
     std::fs::create_dir_all(&skill_dir).unwrap();
     let mut content = format!("---\nname: {}\ndescription: {}\n", name, description);

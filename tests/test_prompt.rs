@@ -31,7 +31,10 @@ fn test_compose_with_default_files() {
     assert!(result.contains("/tmp/project"), "should substitute cwd");
     assert!(result.contains("25"), "should substitute tool count");
     assert!(result.contains("Fix bug"), "should include todo state");
-    assert!(result.contains("deploy"), "should include skill descriptions");
+    assert!(
+        result.contains("deploy"),
+        "should include skill descriptions"
+    );
 }
 
 #[test]
@@ -41,11 +44,7 @@ fn test_missing_files_are_skipped() {
     std::fs::create_dir_all(&prompts_dir).unwrap();
 
     // Only create SOUL.md
-    std::fs::write(
-        prompts_dir.join("SOUL.md"),
-        "You are {name}, role: {role}.",
-    )
-    .unwrap();
+    std::fs::write(prompts_dir.join("SOUL.md"), "You are {name}, role: {role}.").unwrap();
 
     let assembler = PromptAssembler::new(&prompts_dir);
     let ctx = make_context();
@@ -121,5 +120,8 @@ fn test_init_defaults_does_not_overwrite_existing() {
     assembler.init_defaults();
 
     let content = std::fs::read_to_string(prompts_dir.join("SOUL.md")).unwrap();
-    assert_eq!(content, "Custom soul content", "should not overwrite existing file");
+    assert_eq!(
+        content, "Custom soul content",
+        "should not overwrite existing file"
+    );
 }

@@ -137,10 +137,7 @@ fn test_l9_05_correlation_by_request_id_concurrent() {
     tracker.handle_shutdown_request(&bus, "worker2");
     let req2_id = {
         let reqs = tracker.shutdown_requests.lock().unwrap();
-        reqs.keys()
-            .find(|k| **k != req1_id)
-            .unwrap()
-            .clone()
+        reqs.keys().find(|k| **k != req1_id).unwrap().clone()
     };
 
     // Approve only req1
