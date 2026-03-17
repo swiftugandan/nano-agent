@@ -83,6 +83,7 @@ pub struct LifecycleContext {
     pub tasks_dir: PathBuf,
     pub transcript_dir: PathBuf,
     pub agent_name: String,
+    pub idle_signal: Arc<AtomicBool>,
 }
 
 /// Run a teammate through a WORK → IDLE → SHUTDOWN lifecycle.
@@ -100,9 +101,9 @@ pub fn run_teammate_lifecycle(
     tools: &[serde_json::Value],
     dispatch: &Dispatch,
     ctx: &LifecycleContext,
-    idle_signal: &AtomicBool,
     config: &LifecycleConfig,
 ) {
+    let idle_signal = &ctx.idle_signal;
     loop {
         // --- WORK phase ---
         idle_signal.store(false, Ordering::Release);

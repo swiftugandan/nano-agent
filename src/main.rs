@@ -319,7 +319,7 @@ fn extended_tool_definitions() -> Vec<serde_json::Value> {
 // Build extended dispatch closures (L2–L11)
 // ---------------------------------------------------------------------------
 
-fn build_extended_dispatch(
+struct DispatchContext {
     todo: Arc<Mutex<TodoManager>>,
     nag: Arc<Mutex<NagPolicy>>,
     skill_loader: Arc<SkillLoader>,
@@ -336,7 +336,27 @@ fn build_extended_dispatch(
     llm_backend: String,
     compact_signal: Arc<CompactSignal>,
     idle_signal: Arc<AtomicBool>,
-) -> Dispatch {
+}
+
+fn build_extended_dispatch(ctx: DispatchContext) -> Dispatch {
+    let DispatchContext {
+        todo,
+        nag,
+        skill_loader,
+        task_manager,
+        bg,
+        message_bus,
+        teammate_manager,
+        request_tracker,
+        event_bus,
+        heartbeat_manager,
+        repo_root,
+        tasks_dir,
+        agent_name,
+        llm_backend,
+        compact_signal,
+        idle_signal,
+    } = ctx;
     let mut dispatch: Dispatch = HashMap::new();
 
     // -- L2: todo_update
@@ -636,24 +656,24 @@ fn build_extended_dispatch(
                     let teammate_idle = Arc::new(AtomicBool::new(false));
 
                     let mut dispatch = tools::build_dispatch(&cwd_t);
-                    let extended = build_extended_dispatch(
-                        todo_mgr_t,
-                        nag_pol_t,
-                        sk_loader_t,
-                        t_manager_t,
-                        bg_mgr_t,
-                        Arc::clone(&bus_t),
-                        Arc::clone(&tm_mgr_t),
-                        req_tracker_t,
-                        ev_bus_t,
-                        hb_mgr_t,
-                        cwd_t,
-                        tasks_d_t.clone(),
-                        name_t.clone(),
-                        backend_t,
-                        teammate_compact,
-                        Arc::clone(&teammate_idle),
-                    );
+                    let extended = build_extended_dispatch(DispatchContext {
+                        todo: todo_mgr_t,
+                        nag: nag_pol_t,
+                        skill_loader: sk_loader_t,
+                        task_manager: t_manager_t,
+                        bg: bg_mgr_t,
+                        message_bus: Arc::clone(&bus_t),
+                        teammate_manager: Arc::clone(&tm_mgr_t),
+                        request_tracker: req_tracker_t,
+                        event_bus: ev_bus_t,
+                        heartbeat_manager: hb_mgr_t,
+                        repo_root: cwd_t,
+                        tasks_dir: tasks_d_t.clone(),
+                        agent_name: name_t.clone(),
+                        llm_backend: backend_t,
+                        compact_signal: teammate_compact,
+                        idle_signal: Arc::clone(&teammate_idle),
+                    });
                     dispatch.extend(extended);
 
                     let system = format!(
@@ -674,6 +694,7 @@ fn build_extended_dispatch(
                         tasks_dir: tasks_d_t,
                         transcript_dir: transcript_d_t,
                         agent_name: name_t,
+                        idle_signal: teammate_idle,
                     };
                     let config = autonomy::LifecycleConfig::default();
                     autonomy::run_teammate_lifecycle(
@@ -683,7 +704,6 @@ fn build_extended_dispatch(
                         &tool_defs,
                         &dispatch,
                         &ctx,
-                        &teammate_idle,
                         &config,
                     );
                 });
@@ -1000,24 +1020,24 @@ fn main() {
 
     // -- Build dispatch: base + extended
     let mut dispatch = tools::build_dispatch(&cwd);
-    let extended = build_extended_dispatch(
-        Arc::clone(&todo_manager),
-        Arc::clone(&nag_policy),
-        Arc::clone(&skill_loader),
-        Arc::clone(&task_manager),
-        Arc::clone(&background_manager),
-        Arc::clone(&message_bus),
-        Arc::clone(&teammate_manager),
-        Arc::clone(&request_tracker),
-        Arc::clone(&event_bus),
-        Arc::clone(&heartbeat_manager),
-        cwd.to_path_buf(),
-        tasks_dir.clone(),
-        agent_name.clone(),
-        backend.clone(),
-        Arc::clone(&compact_signal),
-        Arc::clone(&idle_signal),
-    );
+    let extended = build_extended_dispatch(DispatchContext {
+        todo: Arc::clone(&todo_manager),
+        nag: Arc::clone(&nag_policy),
+        skill_loader: Arc::clone(&skill_loader),
+        task_manager: Arc::clone(&task_manager),
+        bg: Arc::clone(&background_manager),
+        message_bus: Arc::clone(&message_bus),
+        teammate_manager: Arc::clone(&teammate_manager),
+        request_tracker: Arc::clone(&request_tracker),
+        event_bus: Arc::clone(&event_bus),
+        heartbeat_manager: Arc::clone(&heartbeat_manager),
+        repo_root: cwd.to_path_buf(),
+        tasks_dir: tasks_dir.clone(),
+        agent_name: agent_name.clone(),
+        llm_backend: backend.clone(),
+        compact_signal: Arc::clone(&compact_signal),
+        idle_signal: Arc::clone(&idle_signal),
+    });
     dispatch.extend(extended);
 
     // -- Startup banner
