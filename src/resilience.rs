@@ -1,6 +1,7 @@
 use crate::types::*;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Error classification
@@ -31,6 +32,8 @@ pub fn classify_error(status: u16, body: &str) -> LlmError {
         }
     }
 }
+
+pub type LlmLogSink = Option<Arc<dyn Fn(&'static str, &'static str, &str) + Send + Sync>>;
 
 // ---------------------------------------------------------------------------
 // Retry policy
@@ -157,14 +160,29 @@ pub struct ResilientLlm {
     inner: Box<dyn Llm>,
     policy: RetryPolicy,
     auth: AuthProfile,
+    log: LlmLogSink,
 }
 
 impl ResilientLlm {
-    pub fn new(inner: Box<dyn Llm>, policy: RetryPolicy, auth: AuthProfile) -> Self {
+    pub fn new(
+        inner: Box<dyn Llm>,
+        policy: RetryPolicy,
+        auth: AuthProfile,
+        log: LlmLogSink,
+    ) -> Self {
         Self {
             inner,
             policy,
             auth,
+            log,
+        }
+    }
+
+    fn log(&self, source: &'static str, level: &'static str, msg: &str) {
+        if let Some(ref sink) = self.log {
+            sink(source, level, msg);
+        } else {
+            eprintln!("[{}] {}", source, msg);
         }
     }
 
@@ -189,20 +207,25 @@ impl Llm for ResilientLlm {
             match self.inner.create(params.clone()) {
                 Ok(response) => return Ok(response),
                 Err(LlmError::Transient { status, message }) => {
-                    eprintln!(
-                        "[resilience] Transient error (HTTP {}) on attempt {}/{}. Retrying...",
-                        status,
-                        attempt + 1,
-                        self.policy.max_attempts
+                    self.log(
+                        "resilience",
+                        "warn",
+                        &format!(
+                            "Transient error (HTTP {}) on attempt {}/{}. Retrying...",
+                            status,
+                            attempt + 1,
+                            self.policy.max_attempts
+                        ),
                     );
                     last_error = Some(LlmError::Transient { status, message });
                     std::thread::sleep(self.compute_delay(attempt));
                 }
                 Err(LlmError::Auth { status, message }) => {
                     if self.auth.rotate() {
-                        eprintln!(
-                            "[resilience] Auth error (HTTP {}). Rotated to next API key.",
-                            status
+                        self.log(
+                            "resilience",
+                            "warn",
+                            &format!("Auth error (HTTP {}). Rotated to next API key.", status),
                         );
                         last_error = Some(LlmError::Auth { status, message });
                         continue;
@@ -234,13 +257,23 @@ impl Llm for ResilientLlm {
 pub struct ContextGuard {
     inner: Box<dyn Llm>,
     transcript_dir: PathBuf,
+    log: LlmLogSink,
 }
 
 impl ContextGuard {
-    pub fn new(inner: Box<dyn Llm>, transcript_dir: &Path) -> Self {
+    pub fn new(inner: Box<dyn Llm>, transcript_dir: &Path, log: LlmLogSink) -> Self {
         Self {
             inner,
             transcript_dir: transcript_dir.to_path_buf(),
+            log,
+        }
+    }
+
+    fn log(&self, source: &'static str, level: &'static str, msg: &str) {
+        if let Some(ref sink) = self.log {
+            sink(source, level, msg);
+        } else {
+            eprintln!("[{}] {}", source, msg);
         }
     }
 }
@@ -251,9 +284,13 @@ impl Llm for ContextGuard {
         match self.inner.create(params.clone()) {
             Ok(resp) => return Ok(resp),
             Err(LlmError::Overflow { message }) => {
-                eprintln!(
-                    "[context-guard] Overflow (stage 1), truncating tool results: {}",
-                    &message[..message.len().min(100)]
+                self.log(
+                    "context-guard",
+                    "warn",
+                    &format!(
+                        "Overflow (stage 1), truncating tool results: {}",
+                        &message[..message.len().min(100)]
+                    ),
                 );
             }
             Err(e) => return Err(e),
@@ -266,9 +303,13 @@ impl Llm for ContextGuard {
             match self.inner.create(params2.clone()) {
                 Ok(resp) => return Ok(resp),
                 Err(LlmError::Overflow { message }) => {
-                    eprintln!(
-                        "[context-guard] Overflow (stage 2), compacting history: {}",
-                        &message[..message.len().min(100)]
+                    self.log(
+                        "context-guard",
+                        "warn",
+                        &format!(
+                            "Overflow (stage 2), compacting history: {}",
+                            &message[..message.len().min(100)]
+                        ),
                     );
                 }
                 Err(e) => return Err(e),
@@ -328,7 +369,7 @@ mod tests {
             }],
         );
 
-        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty());
+        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty(), None);
         let resp = llm.create(make_params()).unwrap();
         assert_eq!(resp.stop_reason, "end_turn");
     }
@@ -342,7 +383,7 @@ mod tests {
         });
         mock.queue("end_turn", vec![ContentBlock::Text { text: "ok".into() }]);
 
-        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty());
+        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty(), None);
         let resp = llm.create(make_params()).unwrap();
         assert_eq!(resp.stop_reason, "end_turn");
     }
@@ -357,7 +398,7 @@ mod tests {
             });
         }
 
-        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty());
+        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty(), None);
         let err = llm.create(make_params()).unwrap_err();
         assert!(matches!(err, LlmError::Transient { .. }));
     }
@@ -369,7 +410,7 @@ mod tests {
             message: "too long".into(),
         });
 
-        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty());
+        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty(), None);
         let err = llm.create(make_params()).unwrap_err();
         assert!(matches!(err, LlmError::Overflow { .. }));
     }
@@ -381,7 +422,7 @@ mod tests {
             message: "bad request".into(),
         });
 
-        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty());
+        let mut llm = ResilientLlm::new(Box::new(mock), quick_policy(), AuthProfile::empty(), None);
         let err = llm.create(make_params()).unwrap_err();
         assert!(matches!(err, LlmError::Fatal { .. }));
     }
@@ -397,7 +438,7 @@ mod tests {
             }],
         );
 
-        let mut guard = ContextGuard::new(Box::new(mock), dir.path());
+        let mut guard = ContextGuard::new(Box::new(mock), dir.path(), None);
         let resp = guard.create(make_params()).unwrap();
         assert_eq!(resp.stop_reason, "end_turn");
     }
@@ -418,7 +459,7 @@ mod tests {
             }],
         );
 
-        let mut guard = ContextGuard::new(Box::new(mock), dir.path());
+        let mut guard = ContextGuard::new(Box::new(mock), dir.path(), None);
 
         // Build params with a large tool_result to trigger truncation
         let mut params = make_params();

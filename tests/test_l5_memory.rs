@@ -134,10 +134,10 @@ fn test_l5_03_saves_transcript_before_replacing() {
         .filter(|e| {
             e.file_name()
                 .to_str()
-                .map_or(false, |n| n.starts_with("transcript_"))
+                .is_some_and(|n| n.starts_with("transcript_"))
         })
         .collect();
-    assert!(transcript_files.len() >= 1);
+    assert!(!transcript_files.is_empty());
     let content = std::fs::read_to_string(transcript_files[0].path()).unwrap();
     assert!(!content.is_empty());
 }

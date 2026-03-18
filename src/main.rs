@@ -24,12 +24,16 @@ use nano_agent::protocols::RequestTracker;
 use nano_agent::tasks::TaskManager;
 use nano_agent::teams::{MessageBus, TeammateManager};
 use nano_agent::tools;
+use nano_agent::tui;
+use nano_agent::tui::events::LogLevel as UiLogLevel;
+use nano_agent::tui::theme::Theme as TuiTheme;
 use nano_agent::types::*;
 use nano_agent::ui::{NanoPrompt, PromptState, SpinnerHandle, UiRenderer};
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -44,6 +48,27 @@ const NAG_POLICY_INTERVAL: usize = 3;
 
 const VALID_BACKENDS: &[&str] = &["anthropic", "openai"];
 const RECENT_EVENTS_COUNT: usize = 20;
+
+trait PreTurnUi: Send + Sync {
+    fn compact_notice(&self, path: &str);
+    fn background_notification(&self, source: &str, message: &str);
+}
+
+struct PreTurnUiRepl;
+impl PreTurnUi for PreTurnUiRepl {
+    fn compact_notice(&self, path: &str) {
+        UiRenderer::show_compact_notice(path);
+    }
+    fn background_notification(&self, source: &str, message: &str) {
+        UiRenderer::show_background_notification(source, message);
+    }
+}
+
+struct PreTurnUiNoop;
+impl PreTurnUi for PreTurnUiNoop {
+    fn compact_notice(&self, _path: &str) {}
+    fn background_notification(&self, _source: &str, _message: &str) {}
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -228,6 +253,7 @@ fn build_pre_turn_context(
     turn_count: usize,
     memory_seed: &MemorySeed,
     input: &str,
+    ui: &dyn PreTurnUi,
 ) -> usize {
     // L10: Inject identity if conversation is fresh
     autonomy::inject_identity_if_needed(
@@ -245,7 +271,7 @@ fn build_pre_turn_context(
     if token_count > memory::THRESHOLD {
         let (new_msgs, path) = memory::auto_compact(messages, llm, transcript_dir);
         *messages = new_msgs;
-        UiRenderer::show_compact_notice(&path.display().to_string());
+        ui.compact_notice(&path.display().to_string());
         token_count = memory::estimate_tokens(messages);
     }
 
@@ -280,7 +306,7 @@ fn build_pre_turn_context(
             .drain_notifications();
         if !notifs.is_empty() {
             for n in &notifs {
-                UiRenderer::show_background_notification(
+                ui.background_notification(
                     &n.task_id,
                     &format!("{}: {}", n.status, n.result.trim()),
                 );
@@ -372,6 +398,7 @@ fn run_oneshot(
         1,
         memory_seed,
         prompt,
+        &PreTurnUiNoop,
     );
 
     prompt_assembler.reload();
@@ -492,6 +519,48 @@ fn main() {
         (None, None) => None,
     };
     let oneshot = oneshot_prompt.is_some();
+    let interactive_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let prefer_tui = interactive_tty && !oneshot && !cli.repl;
+    let mut tui_mode = cli.tui || prefer_tui;
+    if tui_mode && !interactive_tty {
+        eprintln!("warning: --tui requires a TTY; falling back to non-interactive behavior");
+        tui_mode = false;
+    }
+    if !interactive_tty && !oneshot && !cli.repl {
+        eprintln!("error: interactive mode requires a TTY. Provide a prompt (one-shot) or use --repl explicitly.");
+        std::process::exit(2);
+    }
+
+    // If we're going to run the full-screen TUI, create the UI event channel early so
+    // LLM wrappers (resilience/context-guard) can log into it from the start.
+    let mut tui_channel: Option<(
+        tui::events::UiEventSender,
+        mpsc::Receiver<tui::events::UiEvent>,
+    )> = if tui_mode {
+        let (tx, rx) = mpsc::channel::<tui::events::UiEvent>();
+        Some((tui::events::UiEventSender::new(tx), rx))
+    } else {
+        None
+    };
+
+    let llm_log_sink: nano_agent::resilience::LlmLogSink = tui_channel.as_ref().map(|(tx, _)| {
+        let tx = tx.clone();
+        Arc::new(
+            move |source: &'static str, level: &'static str, msg: &str| {
+                let lvl = match level {
+                    "debug" => UiLogLevel::Debug,
+                    "warn" => UiLogLevel::Warn,
+                    "error" => UiLogLevel::Error,
+                    _ => UiLogLevel::Info,
+                };
+                let _ = tx.send(tui::events::UiEvent::LogLine {
+                    source: source.to_string(),
+                    level: lvl,
+                    message: msg.to_string(),
+                });
+            },
+        ) as Arc<dyn Fn(&'static str, &'static str, &str) + Send + Sync>
+    });
 
     // -- LLM backend (wrapped in resilience + ContextGuard layers)
     let transcript_dir = data_dir.join("transcripts");
@@ -509,7 +578,12 @@ fn main() {
             }
         };
         (
-            wrap_llm(inner, auth_prefix_for(&config.backend), &transcript_dir),
+            wrap_llm(
+                inner,
+                auth_prefix_for(&config.backend),
+                &transcript_dir,
+                llm_log_sink,
+            ),
             model,
         )
     };
@@ -545,14 +619,7 @@ fn main() {
     // -- Initialize all managers
     let task_manager = Arc::new(RwLock::new(TaskManager::new(&tasks_dir)));
     let event_bus = Arc::new(EventBus::new(&events_path));
-    if !oneshot {
-        let bus = Arc::clone(&event_bus);
-        bus.subscribe(Arc::new(
-            move |record: nano_agent::isolation::EventRecord| {
-                UiRenderer::show_bus_event(&record.event, &record.data);
-            },
-        ));
-    }
+    // Subscriber is installed later once we know the UI mode.
     let skill_loader = Arc::new(SkillLoader::new(&skills_dir));
     let transcript_store = memory::TranscriptStore::new(&transcript_dir);
     let background_manager = Arc::new(Mutex::new(BackgroundManager::new()));
@@ -584,7 +651,7 @@ fn main() {
     let prompt_state = Arc::new(Mutex::new(PromptState::new(&agent_name, &agent_role)));
 
     // -- CLI channel (reedline-based, owned separately for direct read_line access)
-    let cli_channel: Option<Arc<CliChannel>> = if !oneshot {
+    let cli_channel: Option<Arc<CliChannel>> = if !oneshot && !tui_mode {
         let history_path = data_dir.join("history.txt");
         let nano_prompt = NanoPrompt::new(Arc::clone(&prompt_state));
         let cli_ch = Arc::new(
@@ -714,6 +781,7 @@ fn main() {
     // -- Build HandlerRegistry: base + extended
     let mut registry = tools::build_registry(&cwd);
     registry.extend(build_extended_registry(&ctx));
+    let registry = Arc::new(registry);
 
     // GAP 2: Rebuild messages from session if resuming
     let mut messages: Vec<serde_json::Value> = {
@@ -748,14 +816,228 @@ fn main() {
             &seed_collector,
             &tool_defs,
             &model_name,
-            &registry,
+            registry.as_ref(),
             prev_message_count,
             &transcript_store,
         );
         return;
     }
 
-    // -- Interactive REPL mode
+    // -- UI wiring for interactive modes (REPL or TUI)
+    {
+        let bus = Arc::clone(&event_bus);
+        if tui_mode {
+            // TUI subscribes later with its own event channel (see below).
+        } else {
+            bus.subscribe(Arc::new(
+                move |record: nano_agent::isolation::EventRecord| {
+                    UiRenderer::show_bus_event(&record.event, &record.data);
+                },
+            ));
+        }
+    }
+
+    // -- Full-screen TUI mode (default for interactive tty)
+    if tui_mode {
+        let theme = match cli.theme.as_str() {
+            "bold" | "BOLD" => TuiTheme::Bold,
+            "hacker" | "HACKER" => TuiTheme::Hacker,
+            _ => TuiTheme::Bold,
+        };
+
+        let messages_arc = Arc::new(Mutex::new(messages));
+        let llm_arc = Arc::new(Mutex::new(llm_box));
+        let registry_arc = Arc::clone(&registry);
+        let tool_defs_arc = Arc::new(tool_defs);
+
+        let seed_collector = Arc::new(Mutex::new(seed_collector));
+
+        let turn_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let prev_message_count_arc = Arc::new(Mutex::new(prev_message_count));
+
+        // UI event bridge (tool/bus/background/agent-finished + resilience/context-guard logs)
+        let (ui_tx, ui_rx) = tui_channel
+            .take()
+            .expect("tui_channel must be initialized when tui_mode is true");
+
+        // Subscribe bus → TUI
+        {
+            let ui_tx_for_bus = ui_tx.clone();
+            event_bus.subscribe(Arc::new(
+                move |record: nano_agent::isolation::EventRecord| {
+                    let _ = ui_tx_for_bus.send(tui::events::UiEvent::BusEvent {
+                        event: record.event,
+                        data: record.data,
+                    });
+                },
+            ));
+        }
+
+        struct PreTurnUiTui {
+            tx: tui::events::UiEventSender,
+        }
+        impl PreTurnUi for PreTurnUiTui {
+            fn compact_notice(&self, path: &str) {
+                let _ = self.tx.send(tui::events::UiEvent::Warning(format!(
+                    "Compacted. Transcript: {}",
+                    path
+                )));
+            }
+            fn background_notification(&self, source: &str, message: &str) {
+                let _ = self.tx.send(tui::events::UiEvent::Background {
+                    source: source.to_string(),
+                    message: message.to_string(),
+                });
+            }
+        }
+        let preturn_ui = Arc::new(PreTurnUiTui { tx: ui_tx.clone() });
+
+        let prompts_dir = data_dir.join("prompts");
+        let transcript_dir_for_tui = transcript_dir.clone();
+        let projector_for_tui = Arc::clone(&projector);
+        let memory_seed_for_tui = Arc::clone(&memory_seed);
+
+        let model_name_for_tui = model_name.clone();
+        let agent_id_for_tui = agent_id.clone();
+        let session_id_for_tui = session_id.clone();
+        let agent_name_for_tui = agent_name.clone();
+        let agent_role_for_tui = agent_role.clone();
+
+        let ctx_for_launch = ctx.clone();
+        let messages_for_launch = Arc::clone(&messages_arc);
+        let ui_tx_for_launch = ui_tx.clone();
+
+        let launch_agent_turn =
+            move |prompt: String, tool_cb: Arc<dyn Fn(ToolEvent) + Send + Sync>| {
+                let ctx = ctx_for_launch.clone();
+                let messages_arc = Arc::clone(&messages_for_launch);
+                let llm_arc = Arc::clone(&llm_arc);
+                let registry = Arc::clone(&registry_arc);
+                let tool_defs = Arc::clone(&tool_defs_arc);
+                let turn_counter = Arc::clone(&turn_counter);
+                let prev_message_count_arc = Arc::clone(&prev_message_count_arc);
+                let seed_collector = Arc::clone(&seed_collector);
+
+                let projector = Arc::clone(&projector_for_tui);
+                let memory_seed = Arc::clone(&memory_seed_for_tui);
+                let prompts_dir = prompts_dir.clone();
+                let transcript_dir = transcript_dir_for_tui.clone();
+
+                let ui_tx = ui_tx_for_launch.clone();
+                let preturn_ui = Arc::clone(&preturn_ui);
+
+                let model_name = model_name_for_tui.clone();
+                let agent_id = agent_id_for_tui.clone();
+                let session_id = session_id_for_tui.clone();
+                let agent_name = agent_name_for_tui.clone();
+                let agent_role = agent_role_for_tui.clone();
+
+                interrupt_signal.store(false, Ordering::Release);
+
+                std::thread::spawn(move || {
+                    let turn = turn_counter.fetch_add(1, Ordering::AcqRel) + 1;
+                    let turn_key = format!("turn_{}", turn);
+
+                    let mut messages = messages_arc.lock().expect("messages lock poisoned");
+                    let projected_input = projector.project("user_input", &turn_key, &prompt);
+                    messages.push(
+                        serde_json::json!({"role":"user","content": projected_input.as_str()}),
+                    );
+
+                    // Pre-turn pipeline + prompt build needs LLM (for compaction) and dynamic seeds.
+                    let mut llm_guard = llm_arc.lock().expect("llm lock poisoned");
+                    let token_count = build_pre_turn_context(
+                        &mut messages,
+                        &ctx,
+                        llm_guard.as_mut(),
+                        &transcript_dir,
+                        &projector,
+                        turn,
+                        &memory_seed,
+                        &prompt,
+                        preturn_ui.as_ref(),
+                    );
+
+                    let seed_render = seed_collector
+                        .lock()
+                        .expect("SeedCollector lock poisoned")
+                        .render();
+                    let mut prompt_assembler = PromptAssembler::new(&prompts_dir);
+                    prompt_assembler.reload();
+                    let prompt_ctx = build_prompt_context(
+                        &agent_name,
+                        &agent_role,
+                        &ctx.cwd,
+                        tool_defs.len(),
+                        &model_name,
+                        &agent_id,
+                        &session_id,
+                        seed_render,
+                    );
+                    let system = prompt_assembler.compose(&prompt_ctx);
+
+                    let ui_tx_progress = ui_tx.clone();
+                    let loop_ctx = AgentContext {
+                        tool_callback: Some(tool_cb),
+                        subagent_progress: Some(Arc::new(move |msg: &str| {
+                            let _ = ui_tx_progress.send(tui::events::UiEvent::SubagentProgress {
+                                message: msg.to_string(),
+                            });
+                        })),
+                        ..ctx.clone()
+                    };
+                    run_agent_loop(
+                        llm_guard.as_mut(),
+                        &system,
+                        &mut messages,
+                        &tool_defs,
+                        registry.as_ref(),
+                        &loop_ctx,
+                    );
+
+                    // Persist new messages
+                    {
+                        let mut prev = prev_message_count_arc
+                            .lock()
+                            .expect("prev_count lock poisoned");
+                        if messages.len() > *prev {
+                            ctx.services.sessions.append_turn(&messages[*prev..]);
+                            *prev = messages.len();
+                        }
+                    }
+
+                    if let Some(text) = extract_last_response_text(&messages) {
+                        let _ = ui_tx.send(tui::events::UiEvent::AgentFinished {
+                            assistant_text: text,
+                        });
+                    } else {
+                        let _ = ui_tx.send(tui::events::UiEvent::Error(
+                            "No assistant response found.".to_string(),
+                        ));
+                    }
+
+                    let _ = token_count;
+                });
+            };
+
+        let opts = tui::TuiOptions {
+            no_color: cli.no_color,
+            theme,
+        };
+        let ui_tx_for_tui = ui_tx.clone();
+        let _ = tui::run_tui(
+            ctx,
+            Arc::clone(&messages_arc),
+            model_name.clone(),
+            opts,
+            ui_tx_for_tui,
+            ui_rx,
+            launch_agent_turn,
+        );
+        return;
+    }
+
+    // -- Interactive REPL mode (legacy)
     let history_count = std::fs::read_to_string(data_dir.join("history.txt"))
         .map(|s| s.lines().count())
         .unwrap_or(0);
@@ -828,6 +1110,7 @@ fn main() {
             turn_count,
             &memory_seed,
             &input,
+            &PreTurnUiRepl,
         );
 
         // -- Build dynamic system prompt via assembler with seed sections
@@ -861,7 +1144,7 @@ fn main() {
             &system,
             &mut messages,
             &tool_defs,
-            &registry,
+            registry.as_ref(),
             &loop_ctx,
         );
 

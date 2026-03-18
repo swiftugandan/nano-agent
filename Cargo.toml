@@ -18,6 +18,9 @@ clap = { version = "4", features = ["derive"] }
 reedline = "0.37"
 nu-ansi-term = "0.50"
 ctrlc = "3"
+ratatui = "0.29"
+crossterm = "0.29"
+unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -303,17 +303,16 @@ impl Handler for BashHandler {
                                 let stderr_data = stderr_handle.join().unwrap_or_default();
                                 let stdout = String::from_utf8_lossy(&stdout_data);
                                 let stderr = String::from_utf8_lossy(&stderr_data);
-                                let mut result =
-                                    format!("Error: command timed out after {}s", secs);
+                                let mut msg = format!("command timed out after {}s", secs);
                                 if !stdout.is_empty() {
-                                    result.push_str("\n[stdout] ");
-                                    result.push_str(&stdout);
+                                    msg.push_str("\n[stdout] ");
+                                    msg.push_str(&stdout);
                                 }
                                 if !stderr.is_empty() {
-                                    result.push_str("\n[stderr] ");
-                                    result.push_str(&stderr);
+                                    msg.push_str("\n[stderr] ");
+                                    msg.push_str(&stderr);
                                 }
-                                return Ok(result);
+                                return Err(HandlerError::Execution { message: msg });
                             }
                             thread::sleep(Duration::from_millis(50));
                         }

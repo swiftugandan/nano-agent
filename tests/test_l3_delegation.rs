@@ -19,7 +19,7 @@ fn test_l3_01_subagent_starts_with_fresh_messages() {
     let result = SubagentFactory::spawn(
         &mut llm,
         "Do something",
-        &tools,
+        tools,
         &registry,
         &ctx,
         30,
@@ -59,7 +59,7 @@ fn test_l3_02_returns_only_final_text() {
     let result = SubagentFactory::spawn(
         &mut llm,
         "Test",
-        &tools,
+        tools,
         &registry,
         &ctx,
         30,
@@ -128,7 +128,7 @@ fn test_l3_05_respects_iteration_limit() {
     SubagentFactory::spawn(
         &mut llm,
         "Infinite loop",
-        &tools,
+        tools,
         &registry,
         &ctx,
         max_iterations,
@@ -174,7 +174,7 @@ fn test_l3_06_progress_callback_receives_delegation_phases() {
     let _ = SubagentFactory::spawn(
         &mut llm,
         "Read README",
-        &tools,
+        tools,
         &registry,
         &ctx,
         10,
@@ -223,7 +223,7 @@ fn test_l3_07_subagent_llm_auth_error() {
     let result = SubagentFactory::spawn(
         &mut llm,
         "Do work",
-        &tools,
+        tools,
         &registry,
         &ctx,
         5,
@@ -250,7 +250,7 @@ fn test_l3_08_subagent_llm_overflow_error() {
     let result = SubagentFactory::spawn(
         &mut llm,
         "Do work",
-        &tools,
+        tools,
         &registry,
         &ctx,
         5,
@@ -299,7 +299,7 @@ fn test_l3_09_subagent_tool_validation_error() {
     let result = SubagentFactory::spawn(
         &mut llm,
         "Read file",
-        &tools,
+        tools,
         &registry,
         &ctx,
         5,
@@ -347,7 +347,7 @@ fn test_l3_10_subagent_tool_execution_error() {
     let result = SubagentFactory::spawn(
         &mut llm,
         "Run safe command",
-        &tools,
+        tools,
         &registry,
         &ctx,
         5,
@@ -381,7 +381,7 @@ fn test_l3_11_subagent_no_final_text_returns_placeholder() {
     let result = SubagentFactory::spawn(
         &mut llm,
         "Do something",
-        &tools,
+        tools,
         &registry,
         &ctx,
         5,
@@ -403,7 +403,7 @@ fn test_l3_12_subagent_zero_iterations() {
     let result = SubagentFactory::spawn(
         &mut llm,
         "Do work",
-        &tools,
+        tools,
         &registry,
         &ctx,
         0,
@@ -436,7 +436,7 @@ fn test_l3_13_subagent_progress_callback_on_llm_error() {
     let _ = SubagentFactory::spawn(
         &mut llm,
         "Failing task",
-        &tools,
+        tools,
         &registry,
         &ctx,
         5,
@@ -472,7 +472,7 @@ fn test_l3_14_event_bus_emits_progress_and_finish_on_success() {
     let _ = SubagentFactory::spawn(
         &mut llm,
         "Task",
-        &tools,
+        tools,
         &registry,
         &ctx,
         5,
@@ -522,7 +522,7 @@ fn test_l3_15_tool_error_reported_in_progress() {
     let result = SubagentFactory::spawn(
         &mut llm,
         "Read file",
-        &tools,
+        tools,
         &registry,
         &ctx,
         5,
@@ -545,7 +545,7 @@ fn test_l3_16_subagent_with_empty_prompt() {
     let result = SubagentFactory::spawn(
         &mut llm,
         "",
-        &tools,
+        tools,
         &registry,
         &ctx,
         5,
@@ -584,7 +584,7 @@ fn test_l3_17_subagent_with_small_success() {
     let result = SubagentFactory::spawn(
         &mut llm,
         "Simple",
-        &tools,
+        tools,
         &registry,
         &ctx,
         5,

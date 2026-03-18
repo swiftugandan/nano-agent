@@ -219,6 +219,25 @@ impl TaskManager {
     }
 }
 
+/// Load all task JSON files from a directory. Shared by TaskManager and autonomy.
+pub fn load_all_tasks(dir: &Path) -> Vec<Task> {
+    let mut tasks = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("task_") && name_str.ends_with(".json") {
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    if let Ok(task) = serde_json::from_str::<Task>(&content) {
+                        tasks.push(task);
+                    }
+                }
+            }
+        }
+    }
+    tasks
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -312,23 +331,4 @@ mod tests {
         let result = tm.get(999);
         assert!(result.contains("Error"));
     }
-}
-
-/// Load all task JSON files from a directory. Shared by TaskManager and autonomy.
-pub fn load_all_tasks(dir: &Path) -> Vec<Task> {
-    let mut tasks = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with("task_") && name_str.ends_with(".json") {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                    if let Ok(task) = serde_json::from_str::<Task>(&content) {
-                        tasks.push(task);
-                    }
-                }
-            }
-        }
-    }
-    tasks
 }

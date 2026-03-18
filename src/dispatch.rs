@@ -10,7 +10,7 @@ use crate::handler::{
 use crate::isolation::WorktreeManager;
 use crate::openai::OpenAiLlm;
 use crate::planning::TodoItem;
-use crate::resilience::{AuthProfile, ContextGuard, ResilientLlm, RetryPolicy};
+use crate::resilience::{AuthProfile, ContextGuard, LlmLogSink, ResilientLlm, RetryPolicy};
 use crate::tools;
 use crate::types::*;
 
@@ -40,11 +40,12 @@ pub fn wrap_llm(
     inner: Box<dyn Llm>,
     auth_prefix: &str,
     transcript_dir: &std::path::Path,
+    log: LlmLogSink,
 ) -> Box<dyn Llm> {
     let policy = RetryPolicy::from_env();
     let auth = AuthProfile::from_env(auth_prefix);
-    let resilient = Box::new(ResilientLlm::new(inner, policy, auth));
-    Box::new(ContextGuard::new(resilient, transcript_dir))
+    let resilient = Box::new(ResilientLlm::new(inner, policy, auth, log.clone()));
+    Box::new(ContextGuard::new(resilient, transcript_dir, log))
 }
 
 // ---------------------------------------------------------------------------
@@ -348,6 +349,7 @@ pub fn build_extended_registry(ctx: &AgentContext) -> HandlerRegistry {
                         inner_llm,
                         auth_prefix_for(&child_ctx.llm_backend),
                         &transcript_d,
+                        None,
                     );
 
                     // Build tool defs + registry for the teammate

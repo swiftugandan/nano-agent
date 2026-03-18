@@ -100,7 +100,7 @@ impl fmt::Display for LlmError {
 
 impl std::error::Error for LlmError {}
 
-pub trait Llm {
+pub trait Llm: Send {
     fn create(&mut self, params: LlmParams) -> Result<LlmResponse, LlmError>;
 }
 
@@ -168,6 +168,7 @@ impl Default for CompactSignal {
 // ToolEvent: emitted during tool execution for UI feedback
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone)]
 pub enum ToolEvent {
     Start {
         name: String,

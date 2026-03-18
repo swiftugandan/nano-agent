@@ -22,7 +22,7 @@ fn test_l9_01_shutdown_request_creates_pending_entry() {
 
     // Check inbox has message
     let msgs = bus.read_inbox("worker1");
-    assert!(msgs.len() >= 1);
+    assert!(!msgs.is_empty());
     assert!(msgs
         .iter()
         .any(|m| m["type"].as_str() == Some("shutdown_request")));
@@ -113,7 +113,7 @@ fn test_l9_04_plan_approval_sends_response() {
 
     // Check worker1's inbox has response
     let msgs = bus.read_inbox("worker1");
-    assert!(msgs.len() >= 1);
+    assert!(!msgs.is_empty());
     assert!(msgs
         .iter()
         .any(|m| m["type"].as_str() == Some("plan_approval_response")));

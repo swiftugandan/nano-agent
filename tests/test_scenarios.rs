@@ -165,7 +165,7 @@ fn scenario_02_delegation_with_tool_use() {
     let result = SubagentFactory::spawn(
         &mut child_llm,
         "Read data.txt and summarize",
-        &tools,
+        tools,
         &registry,
         &ctx,
         5,
@@ -553,7 +553,7 @@ fn scenario_08_team_delegation() {
     let result = SubagentFactory::spawn(
         &mut child_llm,
         "Analyze data.csv and summarize",
-        &tools,
+        tools,
         &registry,
         &ctx_s08,
         3,
@@ -920,7 +920,7 @@ fn scenario_14_skill_informed_delegation() {
     let result = SubagentFactory::spawn(
         &mut child_llm,
         "Deploy v2.1.0",
-        &tools,
+        tools,
         &registry,
         &ctx_s14,
         3,
@@ -1142,9 +1142,7 @@ fn scenario_18_token_estimation() {
         big_tokens
     );
 
-    // Verify threshold constant is accessible
-    assert!(memory::THRESHOLD > 0);
-    assert!(memory::KEEP_RECENT > 0);
+    // Constants are compiled in; no runtime assertion needed.
 }
 
 // ---------------------------------------------------------------------------
@@ -1341,6 +1339,7 @@ fn scenario_21_resilience_retry_then_succeed() {
         Box::new(mock),
         policy,
         AuthProfile::empty(),
+        None,
     ));
 
     let mut messages: Vec<serde_json::Value> =
@@ -1397,6 +1396,7 @@ fn scenario_22_overflow_triggers_compaction() {
         Box::new(mock),
         policy,
         AuthProfile::empty(),
+        None,
     ));
 
     let tmp_s22 = tmp();
@@ -1426,7 +1426,7 @@ fn scenario_22_overflow_triggers_compaction() {
     let has_overflow_msg = messages.iter().any(|m| {
         m.get("content")
             .and_then(|c| c.as_str())
-            .map_or(false, |s| s.contains("Context overflow"))
+            .is_some_and(|s| s.contains("Context overflow"))
     });
     assert!(has_overflow_msg, "overflow message should be injected");
 }
@@ -1457,6 +1457,7 @@ fn scenario_23_fatal_error_stops_loop() {
         Box::new(mock),
         policy,
         AuthProfile::empty(),
+        None,
     ));
 
     let mut messages: Vec<serde_json::Value> =
@@ -1481,7 +1482,7 @@ fn scenario_23_fatal_error_stops_loop() {
     let has_error_msg = messages.iter().any(|m| {
         m.get("content")
             .and_then(|c| c.as_str())
-            .map_or(false, |s| s.contains("LLM error") || s.contains("Fatal"))
+            .is_some_and(|s| s.contains("LLM error") || s.contains("Fatal"))
     });
     assert!(has_error_msg, "error should be injected into messages");
 }
@@ -1793,7 +1794,7 @@ fn scenario_29_resilient_subagent_delegation() {
         max_delay_ms: 5,
         jitter_factor: 0.0,
     };
-    let mut resilient = ResilientLlm::new(Box::new(mock), policy, AuthProfile::empty());
+    let mut resilient = ResilientLlm::new(Box::new(mock), policy, AuthProfile::empty(), None);
 
     let tools = nano_agent::delegation::child_tools();
     let mut h = HashMap::new();
@@ -1805,7 +1806,7 @@ fn scenario_29_resilient_subagent_delegation() {
     let result = SubagentFactory::spawn(
         &mut resilient,
         "Read data.txt and summarize",
-        &tools,
+        tools,
         &registry,
         &ctx,
         5,
@@ -1901,6 +1902,7 @@ fn scenario_30_full_new_features_integration() {
         Box::new(mock),
         policy,
         AuthProfile::empty(),
+        None,
     ));
 
     let mut messages: Vec<serde_json::Value> =

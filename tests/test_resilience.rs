@@ -23,7 +23,7 @@ fn test_retry_on_transient_error() {
         jitter_factor: 0.0,
     };
     let auth = AuthProfile::empty();
-    let mut resilient = ResilientLlm::new(Box::new(mock), policy, auth);
+    let mut resilient = ResilientLlm::new(Box::new(mock), policy, auth, None);
 
     let result = resilient.create(LlmParams {
         model: "test".into(),
@@ -53,7 +53,7 @@ fn test_fatal_propagates_immediately() {
         max_delay_ms: 10,
         jitter_factor: 0.0,
     };
-    let mut resilient = ResilientLlm::new(Box::new(mock), policy, AuthProfile::empty());
+    let mut resilient = ResilientLlm::new(Box::new(mock), policy, AuthProfile::empty(), None);
 
     let result = resilient.create(LlmParams {
         model: "test".into(),
@@ -83,7 +83,7 @@ fn test_overflow_propagates() {
         max_delay_ms: 10,
         jitter_factor: 0.0,
     };
-    let mut resilient = ResilientLlm::new(Box::new(mock), policy, AuthProfile::empty());
+    let mut resilient = ResilientLlm::new(Box::new(mock), policy, AuthProfile::empty(), None);
 
     let result = resilient.create(LlmParams {
         model: "test".into(),
@@ -117,7 +117,7 @@ fn test_max_attempts_exceeded() {
         max_delay_ms: 10,
         jitter_factor: 0.0,
     };
-    let mut resilient = ResilientLlm::new(Box::new(mock), policy, AuthProfile::empty());
+    let mut resilient = ResilientLlm::new(Box::new(mock), policy, AuthProfile::empty(), None);
 
     let result = resilient.create(LlmParams {
         model: "test".into(),
@@ -199,7 +199,7 @@ fn test_auth_rotation() {
         max_delay_ms: 10,
         jitter_factor: 0.0,
     };
-    let mut resilient = ResilientLlm::new(Box::new(mock), policy, AuthProfile::empty());
+    let mut resilient = ResilientLlm::new(Box::new(mock), policy, AuthProfile::empty(), None);
 
     let result = resilient.create(LlmParams {
         model: "test".into(),

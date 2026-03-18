@@ -24,6 +24,7 @@ pub mod resilience;
 pub mod tasks;
 pub mod teams;
 pub mod tools;
+pub mod tui;
 pub mod types;
 pub mod ui;
 pub mod util;
