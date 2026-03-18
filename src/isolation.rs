@@ -3,15 +3,29 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
-// EventBus: append-only lifecycle events (JSONL)
+// Event record for in-process subscribers (delegation, teammate, subagent)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct EventRecord {
+    pub event: String,
+    pub ts: f64,
+    pub data: serde_json::Value,
+}
+
+// ---------------------------------------------------------------------------
+// EventBus: append-only lifecycle events (JSONL) + in-process subscribers
 // ---------------------------------------------------------------------------
 
 pub struct EventBus {
     pub log_path: PathBuf,
+    subscribers: Mutex<Vec<EventSubscriber>>,
 }
+
+type EventSubscriber = Arc<dyn Fn(EventRecord) + Send + Sync>;
 
 impl EventBus {
     pub fn new(log_path: &Path) -> Self {
@@ -20,6 +34,52 @@ impl EventBus {
         }
         Self {
             log_path: log_path.to_path_buf(),
+            subscribers: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Subscribe to all events (delegation, teammate, subagent, etc.).
+    /// Callback is invoked from the thread that emits; safe to use from REPL or teammate threads.
+    pub fn subscribe(&self, callback: EventSubscriber) {
+        self.subscribers
+            .lock()
+            .expect("EventBus subscribers lock poisoned")
+            .push(callback);
+    }
+
+    /// Emit an event with arbitrary JSON data. Appends to the log and notifies subscribers.
+    /// Use for delegation_sent, teammate_started, subagent_progress, etc.
+    pub fn emit_with_data(&self, event: &str, data: serde_json::Value) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let payload = serde_json::json!({
+            "event": event,
+            "ts": ts,
+            "data": data,
+        });
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.log_path)
+                .unwrap();
+            let line = serde_json::to_string(&payload).unwrap() + "\n";
+            file.write_all(line.as_bytes()).unwrap();
+        }
+        let record = EventRecord {
+            event: event.to_string(),
+            ts,
+            data,
+        };
+        let subs = self
+            .subscribers
+            .lock()
+            .expect("EventBus subscribers lock poisoned");
+        for cb in subs.iter() {
+            cb(record.clone());
         }
     }
 

@@ -150,3 +150,43 @@ fn test_l9_05_correlation_by_request_id_concurrent() {
     assert_eq!(reqs[&req1_id].status, "approved");
     assert_eq!(reqs[&req2_id].status, "pending");
 }
+
+#[test]
+fn test_l9_06_plan_review_unknown_request_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let inbox_dir = dir.path().join("inbox");
+    std::fs::create_dir_all(&inbox_dir).unwrap();
+
+    let bus = MessageBus::new(&inbox_dir);
+    let tracker = RequestTracker::new();
+
+    let result = tracker.handle_plan_review(&bus, "unknown_req", true, "Good");
+    assert!(result.contains("Unknown") || result.contains("Error"));
+}
+
+#[test]
+fn test_l9_07_request_tracker_clear() {
+    let dir = tempfile::tempdir().unwrap();
+    let inbox_dir = dir.path().join("inbox");
+    std::fs::create_dir_all(&inbox_dir).unwrap();
+
+    let bus = MessageBus::new(&inbox_dir);
+    let tracker = RequestTracker::new();
+
+    // Add some requests
+    tracker.handle_shutdown_request(&bus, "worker1");
+    tracker.handle_shutdown_request(&bus, "worker2");
+
+    let reqs_before = tracker.shutdown_requests.lock().unwrap();
+    assert_eq!(reqs_before.len(), 2);
+    drop(reqs_before);
+
+    tracker.clear();
+
+    let reqs_after = tracker.shutdown_requests.lock().unwrap();
+    assert_eq!(reqs_after.len(), 0);
+    drop(reqs_after);
+
+    let plan_reqs = tracker.plan_requests.lock().unwrap();
+    assert_eq!(plan_reqs.len(), 0);
+}

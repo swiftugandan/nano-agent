@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+pub type ProgressCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Content blocks

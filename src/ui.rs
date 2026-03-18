@@ -205,6 +205,8 @@ pub struct StatusInfo<'a> {
     pub uptime: Duration,
     pub todo_state: &'a str,
     pub bg_count: usize,
+    /// One-line or multi-line teammate status (e.g. from TeammateManager::list_all).
+    pub teammate_state: &'a str,
 }
 
 pub struct UiRenderer;
@@ -319,6 +321,91 @@ impl UiRenderer {
         }
     }
 
+    /// Subagent progress lines (REPL): what the subagent is doing.
+    pub fn show_subagent_progress(msg: &str) {
+        println!("   {}\u{2514} subagent: {}{}", DIM_GRAY, msg, RESET);
+    }
+
+    /// Shown when the main agent delegates work to a subagent (tool start).
+    pub fn show_delegation_to_subagent(prompt_preview: &str) {
+        let preview = if prompt_preview.chars().count() > 60 {
+            format!("{}...", prompt_preview.chars().take(57).collect::<String>())
+        } else {
+            prompt_preview.to_string()
+        };
+        println!(
+            "   {}\u{2192} delegating to subagent: {}{}",
+            DIM_GRAY, preview, RESET
+        );
+    }
+
+    /// Shown when the main agent sends a task to a teammate (send_message).
+    pub fn show_delegation_to_teammate(to: &str, content_preview: &str) {
+        let preview = if content_preview.chars().count() > 50 {
+            format!(
+                "{}...",
+                content_preview.chars().take(47).collect::<String>()
+            )
+        } else {
+            content_preview.to_string()
+        };
+        println!(
+            "   {}\u{2192} delegated to {}: {}{}",
+            DIM_GRAY, to, preview, RESET
+        );
+    }
+
+    /// Shown when the main agent broadcasts to the team (broadcast_message).
+    pub fn show_delegation_broadcast(content_preview: &str) {
+        let preview = if content_preview.chars().count() > 50 {
+            format!(
+                "{}...",
+                content_preview.chars().take(47).collect::<String>()
+            )
+        } else {
+            content_preview.to_string()
+        };
+        println!(
+            "   {}\u{2192} delegated to team (broadcast): {}{}",
+            DIM_GRAY, preview, RESET
+        );
+    }
+
+    /// Render an event from the event bus for REPL (teammate, subagent).
+    /// Delegation_sent/broadcast are not shown here (tool_callback already shows them).
+    /// Safe to call from any thread (e.g. teammate thread).
+    pub fn show_bus_event(event: &str, data: &serde_json::Value) {
+        let msg = match event {
+            "teammate_started" => {
+                let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let role = data.get("role").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("\u{25B6} [event] {} ({}) started working", name, role)
+            }
+            "teammate_received" => {
+                let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let count = data
+                    .get("message_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let from = data.get("from").and_then(|v| v.as_str()).unwrap_or("?");
+                format!(
+                    "\u{25B6} [event] {} picked up {} message(s) from {}",
+                    name, count, from
+                )
+            }
+            "subagent_progress" => {
+                let message = data.get("message").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("\u{2514} [event] subagent: {}", message)
+            }
+            "subagent_finished" => {
+                let len = data.get("result_len").and_then(|v| v.as_u64()).unwrap_or(0);
+                format!("\u{2713} [event] subagent finished ({} chars)", len)
+            }
+            _ => return,
+        };
+        println!("   {}{}{}", DIM_GRAY, msg, RESET);
+    }
+
     pub fn show_tool_complete(name: &str, summary: &str, duration: Duration) {
         println!(
             "   {}\u{2713} {} ({:.1}s){}",
@@ -378,6 +465,7 @@ impl UiRenderer {
             uptime,
             todo_state,
             bg_count,
+            teammate_state,
         } = *info;
         let border = Style::new().dimmed().fg(Color::Cyan);
         let value = Style::new().bold().fg(Color::White);
@@ -437,6 +525,22 @@ impl UiRenderer {
                 "{}",
                 status_row("background", &format!("{} completed", bg_count))
             );
+        }
+        if !teammate_state.is_empty() && teammate_state != "No teammates." {
+            let blank = format!("{:<width$}", "", width = w);
+            println!(" {} {}{}", pipe, blank, pipe);
+            let thdr = format!(" {:<width$}", "Teammates:", width = w - 1);
+            println!(" {} {}{}", pipe, value.paint(&thdr), pipe);
+            for line in teammate_state.lines().take(8) {
+                let truncated = if line.chars().count() > w - 3 {
+                    let t: String = line.chars().take(w - 6).collect();
+                    format!("{}...", t)
+                } else {
+                    line.to_string()
+                };
+                let padded = format!("   {:<width$}", truncated, width = w - 3);
+                println!(" {} {}{}", pipe, padded, pipe);
+            }
         }
         println!("{}", bot);
         println!();

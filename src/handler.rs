@@ -18,7 +18,7 @@ use crate::planning::{NagPolicy, TodoManager};
 use crate::protocols::RequestTracker;
 use crate::tasks::TaskManager;
 use crate::teams::{MessageBus, TeammateManager};
-use crate::types::{CompactSignal, ToolEvent};
+use crate::types::{CompactSignal, ProgressCallback, ToolEvent};
 
 // ---------------------------------------------------------------------------
 // HandlerError + HandlerResult
@@ -174,6 +174,8 @@ pub struct AgentContext {
     pub projector: Option<Arc<Projector>>,
     pub transcript_dir: Option<PathBuf>,
     pub tool_callback: Option<Arc<dyn Fn(ToolEvent) + Send + Sync>>,
+    /// When set (e.g. in REPL), subagent steps are reported here for display.
+    pub subagent_progress: Option<ProgressCallback>,
 }
 
 impl AgentContext {
@@ -202,6 +204,7 @@ impl AgentContext {
         ctx.tool_callback = None;
         ctx.projector = None;
         ctx.transcript_dir = transcript_dir;
+        ctx.subagent_progress = None;
         ctx
     }
 
@@ -253,6 +256,7 @@ impl AgentContext {
             projector: None,
             transcript_dir: None,
             tool_callback: None,
+            subagent_progress: None,
         }
     }
 }

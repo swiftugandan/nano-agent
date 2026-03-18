@@ -93,3 +93,108 @@ fn test_l8_05_teammate_gets_fresh_messages() {
     // The member was created with the prompt in fresh messages
     assert_eq!(member.unwrap().status, "working");
 }
+
+#[test]
+fn test_l8_06_broadcast_with_empty_teammates() {
+    let dir = tempfile::tempdir().unwrap();
+    let inbox_dir = dir.path().join("inbox");
+    std::fs::create_dir_all(&inbox_dir).unwrap();
+
+    let bus = MessageBus::new(&inbox_dir);
+    let empty_team: Vec<String> = Vec::new();
+    let result = bus.broadcast("alice", "Hello empty", &empty_team);
+    assert!(result.contains("0"));
+}
+
+#[test]
+fn test_l8_07_send_typed_with_extra_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let inbox_dir = dir.path().join("inbox");
+    std::fs::create_dir_all(&inbox_dir).unwrap();
+
+    let bus = MessageBus::new(&inbox_dir);
+    bus.send_typed(
+        "lead",
+        "worker",
+        "Review plan",
+        "plan_request",
+        Some(serde_json::json!({"request_id": "req123", "plan": "Refactor auth"})),
+    );
+
+    let msgs = bus.read_inbox("worker");
+    assert_eq!(msgs.len(), 1);
+    let msg = &msgs[0];
+    assert_eq!(msg["type"].as_str().unwrap(), "plan_request");
+    assert_eq!(msg["from"].as_str().unwrap(), "lead");
+    assert_eq!(msg["content"].as_str().unwrap(), "Review plan");
+    assert_eq!(msg["request_id"].as_str().unwrap(), "req123");
+    assert_eq!(msg["plan"].as_str().unwrap(), "Refactor auth");
+}
+
+#[test]
+fn test_l8_08_shutdown_sets_status_and_signals() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let team_dir = dir.path().join("team");
+    std::fs::create_dir_all(&team_dir).unwrap();
+
+    let mut team = TeammateManager::new(&team_dir);
+    team.spawn("worker", "coder", "Work");
+
+    // Register an idle signal for the worker
+    let signal = Arc::new(AtomicBool::new(false));
+    team.register_idle_signal("worker", Arc::clone(&signal));
+
+    // Shutdown the worker
+    let result = team.shutdown("worker");
+    assert!(result.contains("worker"));
+
+    // Verify status is shutdown
+    let member = team.find_member("worker").unwrap();
+    assert_eq!(member.status, "shutdown");
+
+    // Verify signal was set
+    assert!(signal.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[test]
+fn test_l8_09_is_shutdown_requested() {
+    let dir = tempfile::tempdir().unwrap();
+    let team_dir = dir.path().join("team");
+    std::fs::create_dir_all(&team_dir).unwrap();
+
+    let mut team = TeammateManager::new(&team_dir);
+    team.spawn("alice", "tester", "Test");
+    team.spawn("bob", "coder", "Code");
+
+    // Alice working - not shutdown requested
+    assert!(!team.is_shutdown_requested("alice"));
+
+    // Shutdown bob
+    team.set_status("bob", "shutdown");
+    assert!(team.is_shutdown_requested("bob"));
+}
+
+#[test]
+fn test_l8_10_spawn_existing_with_idle_status_allows_reuse() {
+    let dir = tempfile::tempdir().unwrap();
+    let team_dir = dir.path().join("team");
+    std::fs::create_dir_all(&team_dir).unwrap();
+
+    let mut team = TeammateManager::new(&team_dir);
+    team.spawn("worker", "coder", "Initial");
+
+    // Set to idle
+    team.set_status("worker", "idle");
+    let member = team.find_member("worker").unwrap();
+    assert_eq!(member.status, "idle");
+
+    // Spawn again should succeed and set to working
+    let result = team.spawn("worker", "coder", "New work");
+    assert!(result.contains("worker"));
+    let member = team.find_member("worker").unwrap();
+    assert_eq!(member.status, "working");
+    assert_eq!(member.role, "coder");
+}

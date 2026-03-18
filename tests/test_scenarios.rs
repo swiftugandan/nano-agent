@@ -6,7 +6,7 @@
 use nano_agent::autonomy;
 use nano_agent::concurrency::BackgroundManager;
 use nano_agent::core_loop::{run_agent_loop, PathSandbox};
-use nano_agent::delegation::SubagentFactory;
+use nano_agent::delegation::{SpawnHooks, SubagentFactory};
 use nano_agent::handler::{AgentContext, HandlerRegistry};
 use nano_agent::isolation::{EventBus, WorktreeManager};
 use nano_agent::knowledge::SkillLoader;
@@ -169,6 +169,7 @@ fn scenario_02_delegation_with_tool_use() {
         &registry,
         &ctx,
         5,
+        SpawnHooks::default(),
     );
 
     assert!(
@@ -556,6 +557,7 @@ fn scenario_08_team_delegation() {
         &registry,
         &ctx_s08,
         3,
+        SpawnHooks::default(),
     );
     assert!(result.contains("Analysis complete"));
 
@@ -922,6 +924,7 @@ fn scenario_14_skill_informed_delegation() {
         &registry,
         &ctx_s14,
         3,
+        SpawnHooks::default(),
     );
 
     assert!(result.contains("Deployment complete"));
@@ -1806,6 +1809,7 @@ fn scenario_29_resilient_subagent_delegation() {
         &registry,
         &ctx,
         5,
+        SpawnHooks::default(),
     );
 
     assert!(

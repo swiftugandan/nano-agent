@@ -119,7 +119,7 @@ pub fn run_agent_loop(
                         Ok(out) => {
                             cb(ToolEvent::Complete {
                                 name: name.clone(),
-                                summary: summarize_tool_output(out),
+                                summary: summarize_tool_output(name, out),
                                 duration,
                             });
                         }
@@ -164,8 +164,28 @@ pub fn run_agent_loop(
     call_count
 }
 
-/// Summarize tool output for display (line count or truncated text).
-fn summarize_tool_output(output: &str) -> String {
+/// Summarize tool output for display (tool-aware: teammates, inbox, or generic).
+fn summarize_tool_output(tool_name: &str, output: &str) -> String {
+    if tool_name == "list_teammates" && output.starts_with("Team:") {
+        let members = output.lines().count().saturating_sub(1);
+        return if members == 0 {
+            "No teammates.".into()
+        } else {
+            format!("{} teammate(s)", members)
+        };
+    }
+    if tool_name == "read_inbox" {
+        if output == "No messages." || output.starts_with("No messages") {
+            return "No messages.".into();
+        }
+        // JSON array of messages
+        if output.trim_start().starts_with('[') {
+            if let Ok(v) = serde_json::from_str::<Vec<serde_json::Value>>(output) {
+                let n = v.len();
+                return format!("{} message(s)", n);
+            }
+        }
+    }
     let line_count = output.lines().count();
     if line_count > 3 {
         format!("{} lines", line_count)

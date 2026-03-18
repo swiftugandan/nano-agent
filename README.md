@@ -131,6 +131,23 @@ cargo test test_l1       # run a specific test suite (e.g. core loop)
 cargo test scenario_19   # run a single scenario
 ```
 
+### Testing delegation visibility (REPL)
+
+Delegation progress is only shown in **interactive REPL** mode (not in one-shot).
+
+1. **Automated:** Progress phases are covered by:
+   ```bash
+   cargo test test_l3_06
+   ```
+
+2. **Subagent in REPL:** Start the agent, then ask it to delegate a small task so it uses the `subagent` tool, e.g.:
+   - *"Use the subagent to read the first 5 lines of README.md and summarize."*
+   You should see: `tool: subagent`, then `→ delegating to subagent: ...`, then lines like `└ subagent: picked up — started`, `└ subagent: working — step N`, `└ subagent: running tool: read_file`, `└ subagent: complete (...)`.
+
+3. **Teammate delegation:** If the agent sends a message to a teammate (e.g. *"Send a message to specialist: analyze data in data.csv"*), you should see after `tool: send_message` a line: `→ delegated to specialist: ...`.
+
+4. **Teammate status:** Run `/status` to see a **Teammates:** section (working/idle). Run `/team` for the full teammate list.
+
 ### Adding a Tool
 
 1. Define the tool schema in `src/tools.rs` (`tool_definitions()`)

@@ -118,3 +118,50 @@ fn test_l6_05_add_blocks_creates_bidirectional_edge() {
     assert!(t1_blocks.contains(&t2_id));
     assert!(t2_blocked_by.contains(&t1_id));
 }
+
+#[test]
+fn test_l6_06_get_nonexistent_task_returns_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let tasks_dir = dir.path().join("tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+
+    let tm = TaskManager::new(&tasks_dir);
+    let result = tm.get(999);
+    assert!(result.contains("Error") || result.contains("not found"));
+}
+
+#[test]
+fn test_l6_07_exists_checks_file_existence() {
+    let dir = tempfile::tempdir().unwrap();
+    let tasks_dir = dir.path().join("tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+
+    let tm = TaskManager::new(&tasks_dir);
+    let t: serde_json::Value = serde_json::from_str(&tm.create("Exist check")).unwrap();
+    let t_id = t["id"].as_i64().unwrap();
+
+    assert!(tm.exists(t_id));
+    assert!(!tm.exists(999));
+}
+
+#[test]
+fn test_l6_08_bind_worktree_nonexistent_task_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let tasks_dir = dir.path().join("tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+
+    let tm = TaskManager::new(&tasks_dir);
+    let result = tm.bind_worktree(999, "/tmp/wt");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_l6_09_unbind_worktree_nonexistent_task_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let tasks_dir = dir.path().join("tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+
+    let tm = TaskManager::new(&tasks_dir);
+    let result = tm.unbind_worktree(999);
+    assert!(result.is_err());
+}

@@ -1,6 +1,7 @@
 use crate::anthropic::AnthropicLlm;
 use crate::autonomy;
 use crate::concurrency::LANE_BACKGROUND;
+use crate::delegation::SpawnHooks;
 use crate::delegation::{child_tools, SubagentFactory};
 use crate::delivery;
 use crate::handler::{
@@ -232,10 +233,21 @@ pub fn build_extended_registry(ctx: &AgentContext) -> HandlerRegistry {
             |ctx: &AgentContext, input: serde_json::Value| -> HandlerResult {
                 let to = require_str(&input, "to")?;
                 let content = require_str(&input, "content")?;
-                Ok(ctx
+                let result = ctx
                     .services
                     .message_bus
-                    .send(&ctx.identity.name, to, content))
+                    .send(&ctx.identity.name, to, content);
+                let preview: String = content.chars().take(60).collect();
+                let preview = if content.len() > 60 {
+                    format!("{}...", preview)
+                } else {
+                    preview
+                };
+                ctx.services.event_bus.emit_with_data(
+                    "delegation_sent",
+                    serde_json::json!({ "from": ctx.identity.name, "to": to, "content_preview": preview }),
+                );
+                Ok(result)
             },
         ),
     );
@@ -252,10 +264,21 @@ pub fn build_extended_registry(ctx: &AgentContext) -> HandlerRegistry {
                     .read()
                     .expect("TeammateManager read lock poisoned")
                     .member_names();
-                Ok(ctx
+                let result = ctx
                     .services
                     .message_bus
-                    .broadcast(&ctx.identity.name, content, &names))
+                    .broadcast(&ctx.identity.name, content, &names);
+                let preview: String = content.chars().take(60).collect();
+                let preview = if content.len() > 60 {
+                    format!("{}...", preview)
+                } else {
+                    preview
+                };
+                ctx.services.event_bus.emit_with_data(
+                    "delegation_broadcast",
+                    serde_json::json!({ "from": ctx.identity.name, "content_preview": preview, "recipients": names.len() }),
+                );
+                Ok(result)
             },
         ),
     );
@@ -486,14 +509,20 @@ pub fn build_extended_registry(ctx: &AgentContext) -> HandlerRegistry {
                 // Subagents only use core tools (no extended services), so a mock
                 // context is sufficient. This avoids sharing parent's live services.
                 let child_ctx = AgentContext::mock(&ctx.cwd);
-                Ok(SubagentFactory::spawn(
+                let hooks = SpawnHooks {
+                    progress: ctx.subagent_progress.as_ref(),
+                    event_bus: Some(&ctx.services.event_bus),
+                };
+                let out = SubagentFactory::spawn(
                     child_llm.as_mut(),
                     prompt,
                     child_tool_defs,
                     &child_registry,
                     &child_ctx,
                     10,
-                ))
+                    hooks,
+                );
+                Ok(out)
             },
         ),
     );

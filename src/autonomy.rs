@@ -161,17 +161,18 @@ pub fn run_teammate_lifecycle(
             .write()
             .expect("TeammateManager write lock poisoned")
             .set_status(&ctx.identity.name, "working");
+        ctx.services.event_bus.emit_with_data(
+            "teammate_started",
+            serde_json::json!({ "name": ctx.identity.name, "role": ctx.identity.role }),
+        );
 
         run_agent_loop(llm, system, messages, tools, registry, ctx);
 
-        // If idle_signal wasn't set (i.e. LLM stopped for another reason), shut down
+        // If idle_signal wasn't set, the LLM ended without calling the idle tool (e.g. first
+        // turn it just said "I'm ready" and stopped). Treat that as "no work yet" and go to IDLE
+        // so the teammate can poll for inbox/tasks instead of shutting down immediately.
         if !idle_signal.load(Ordering::Acquire) {
-            ctx.services
-                .teammate_manager
-                .write()
-                .expect("TeammateManager write lock poisoned")
-                .set_status(&ctx.identity.name, "shutdown");
-            return;
+            // Fall through to IDLE phase instead of return
         }
 
         // --- IDLE phase ---
@@ -200,6 +201,18 @@ pub fn run_teammate_lifecycle(
             // so we must consume the result immediately if non-empty.
             let inbox = ctx.services.message_bus.read_inbox(&ctx.identity.name);
             if !inbox.is_empty() {
+                ctx.services.event_bus.emit_with_data(
+                    "teammate_received",
+                    serde_json::json!({
+                        "name": ctx.identity.name,
+                        "message_count": inbox.len(),
+                        "from": inbox
+                            .first()
+                            .and_then(|m| m.get("from"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?"),
+                    }),
+                );
                 messages.push(serde_json::json!({"role": "user", "content": format_inbox(&inbox)}));
                 break; // back to WORK
             }

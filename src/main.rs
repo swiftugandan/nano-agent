@@ -133,6 +133,12 @@ fn handle_slash_command(
                 .lock()
                 .expect("BackgroundManager lock poisoned")
                 .drain_notifications();
+            let teammate_state = ctx
+                .services
+                .teammate_manager
+                .read()
+                .expect("TeammateManager read lock poisoned")
+                .list_all();
             UiRenderer::show_status(&nano_agent::ui::StatusInfo {
                 tokens,
                 turns: messages.len(),
@@ -142,6 +148,7 @@ fn handle_slash_command(
                 uptime: repl_start.elapsed(),
                 todo_state: &todo_state,
                 bg_count: bg_notifs.len(),
+                teammate_state: &teammate_state,
             });
             SlashResult::Handled
         }
@@ -193,7 +200,7 @@ fn handle_slash_command(
             println!("  /clear   Save transcript and reset conversation");
             println!("  /status  Show session status (tokens, turns, todos)");
             println!("  /tasks   List background tasks");
-            println!("  /team    List teammates");
+            println!("  /team    List teammates (status: working, idle)");
             println!("  /events  Show recent events");
             println!("  /resume  List sessions available to resume");
             println!("  /help    Show this help");
@@ -382,9 +389,9 @@ fn run_oneshot(
 
     run_agent_loop(llm, &system, messages, tool_defs, registry, ctx);
 
-    // Print only the final assistant response text to stdout
+    // Print only the final assistant response text to stdout (trailing newline for clean shell)
     if let Some(text) = extract_last_response_text(messages) {
-        print!("{}", text);
+        println!("{}", text.trim_end());
     }
 
     // Persist session
@@ -407,6 +414,23 @@ fn build_tool_callback(spinner: &Arc<SpinnerHandle>) -> Arc<dyn Fn(ToolEvent) + 
         } => {
             spinner_ref.pause_and_clear();
             UiRenderer::show_tool_start(name, input);
+            // Delegation visibility: show who work was delegated to
+            if name == "subagent" {
+                if let Some(preview) = input.get("prompt").and_then(|v| v.as_str()) {
+                    UiRenderer::show_delegation_to_subagent(preview);
+                }
+            } else if name == "send_message" {
+                if let (Some(to), Some(content)) = (
+                    input.get("to").and_then(|v| v.as_str()),
+                    input.get("content").and_then(|v| v.as_str()),
+                ) {
+                    UiRenderer::show_delegation_to_teammate(to, content);
+                }
+            } else if name == "broadcast_message" {
+                if let Some(content) = input.get("content").and_then(|v| v.as_str()) {
+                    UiRenderer::show_delegation_broadcast(content);
+                }
+            }
         }
         ToolEvent::Complete {
             ref name,
@@ -521,6 +545,14 @@ fn main() {
     // -- Initialize all managers
     let task_manager = Arc::new(RwLock::new(TaskManager::new(&tasks_dir)));
     let event_bus = Arc::new(EventBus::new(&events_path));
+    if !oneshot {
+        let bus = Arc::clone(&event_bus);
+        bus.subscribe(Arc::new(
+            move |record: nano_agent::isolation::EventRecord| {
+                UiRenderer::show_bus_event(&record.event, &record.data);
+            },
+        ));
+    }
     let skill_loader = Arc::new(SkillLoader::new(&skills_dir));
     let transcript_store = memory::TranscriptStore::new(&transcript_dir);
     let background_manager = Arc::new(Mutex::new(BackgroundManager::new()));
@@ -670,6 +702,13 @@ fn main() {
         projector: Some(Arc::clone(&projector)),
         transcript_dir: Some(transcript_dir.clone()),
         tool_callback: None, // set per-loop-iteration in REPL
+        subagent_progress: if oneshot {
+            None
+        } else {
+            Some(Arc::new(|msg: &str| {
+                UiRenderer::show_subagent_progress(msg)
+            }))
+        },
     };
 
     // -- Build HandlerRegistry: base + extended
