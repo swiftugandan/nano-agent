@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod agent_core;
 pub mod autonomy;
 pub mod channels;
 pub mod cli;
@@ -17,6 +18,7 @@ pub mod memory;
 pub mod memory_store;
 pub mod mock;
 pub mod openai;
+pub mod pipeline;
 pub mod planning;
 pub mod prompt;
 pub mod protocols;
@@ -28,3 +30,4 @@ pub mod tui;
 pub mod types;
 pub mod ui;
 pub mod util;
+pub mod ws_jsonrpc;

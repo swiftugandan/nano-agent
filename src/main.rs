@@ -1,7 +1,7 @@
 use clap::Parser;
 use nano_agent::anthropic::AnthropicLlm;
-use nano_agent::autonomy;
 use nano_agent::channels::{ChannelManager, CliChannel};
+use nano_agent::channels::Channel;
 use nano_agent::cli::Cli;
 use nano_agent::concurrency::BackgroundManager;
 use nano_agent::context::{MemorySeed, Projector, SeedCollector, SkillSeed, TaskSeed, TodoSeed};
@@ -9,6 +9,7 @@ use nano_agent::core_loop::run_agent_loop;
 use nano_agent::delivery::{DeliveryQueue, DeliveryRunner};
 use nano_agent::dispatch::{auth_prefix_for, build_extended_registry, wrap_llm};
 use nano_agent::gateway::Gateway;
+use nano_agent::gateway::WebSocketChannel;
 use nano_agent::handler::{
     AgentContext, AgentIdentity, AgentServices, AgentSignals, HandlerRegistry,
 };
@@ -19,6 +20,7 @@ use nano_agent::memory;
 use nano_agent::memory_store::MemoryStore;
 use nano_agent::openai::OpenAiLlm;
 use nano_agent::planning::{NagPolicy, TodoManager};
+use nano_agent::pipeline::{build_pre_turn_context, PreTurnUi};
 use nano_agent::prompt::{build_prompt_context, extract_last_response_text, PromptAssembler};
 use nano_agent::protocols::RequestTracker;
 use nano_agent::tasks::TaskManager;
@@ -29,6 +31,9 @@ use nano_agent::tui::events::LogLevel as UiLogLevel;
 use nano_agent::tui::theme::Theme as TuiTheme;
 use nano_agent::types::*;
 use nano_agent::ui::{NanoPrompt, PromptState, SpinnerHandle, UiRenderer};
+use nano_agent::ws_jsonrpc;
+use nano_agent::{agent_core, ws_jsonrpc::JsonRpcNotification};
+use std::collections::HashMap;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -48,11 +53,6 @@ const NAG_POLICY_INTERVAL: usize = 3;
 
 const VALID_BACKENDS: &[&str] = &["anthropic", "openai"];
 const RECENT_EVENTS_COUNT: usize = 20;
-
-trait PreTurnUi: Send + Sync {
-    fn compact_notice(&self, path: &str);
-    fn background_notification(&self, source: &str, message: &str);
-}
 
 struct PreTurnUiRepl;
 impl PreTurnUi for PreTurnUiRepl {
@@ -237,128 +237,6 @@ fn handle_slash_command(
 }
 
 // ---------------------------------------------------------------------------
-// Pre-turn pipeline
-// ---------------------------------------------------------------------------
-
-/// Runs identity injection, token compaction, nag policy, background
-/// notifications, inbox drain, and heartbeat drain. Returns the token count
-/// so the caller can reuse it for prompt-state updates.
-#[allow(clippy::too_many_arguments)]
-fn build_pre_turn_context(
-    messages: &mut Vec<serde_json::Value>,
-    ctx: &AgentContext,
-    llm: &mut dyn Llm,
-    transcript_dir: &std::path::Path,
-    projector: &Projector,
-    turn_count: usize,
-    memory_seed: &MemorySeed,
-    input: &str,
-    ui: &dyn PreTurnUi,
-) -> usize {
-    // L10: Inject identity if conversation is fresh
-    autonomy::inject_identity_if_needed(
-        messages,
-        &ctx.identity.name,
-        &ctx.identity.role,
-        "nano-agent",
-    );
-
-    // L5: Token estimation and memory compaction
-    let mut token_count = memory::estimate_tokens(messages);
-    if token_count > memory::MICRO_COMPACT_THRESHOLD {
-        memory::micro_compact(messages);
-    }
-    if token_count > memory::THRESHOLD {
-        let (new_msgs, path) = memory::auto_compact(messages, llm, transcript_dir);
-        *messages = new_msgs;
-        ui.compact_notice(&path.display().to_string());
-        token_count = memory::estimate_tokens(messages);
-    }
-
-    // Render todo state once for nag policy
-    let todo_state = ctx
-        .services
-        .todo
-        .read()
-        .expect("TodoManager read lock poisoned")
-        .render();
-
-    // L2: Nag policy
-    {
-        let mut nag = ctx.services.nag.lock().expect("NagPolicy lock poisoned");
-        nag.tick();
-        if nag.should_inject() {
-            let nag_msg = format!(
-                "[System reminder: You haven't updated your todo list recently. Current state:\n{}]",
-                todo_state
-            );
-            messages.push(serde_json::json!({"role": "user", "content": nag_msg}));
-        }
-    }
-
-    // L7: Drain background notifications (projected)
-    {
-        let notifs = ctx
-            .services
-            .bg
-            .lock()
-            .expect("BackgroundManager lock poisoned")
-            .drain_notifications();
-        if !notifs.is_empty() {
-            for n in &notifs {
-                ui.background_notification(
-                    &n.task_id,
-                    &format!("{}: {}", n.status, n.result.trim()),
-                );
-            }
-            let text: Vec<String> = notifs
-                .iter()
-                .map(|n| {
-                    format!(
-                        "[Background {} {}]: {}",
-                        n.task_id,
-                        n.status,
-                        n.result.trim()
-                    )
-                })
-                .collect();
-            let raw = text.join("\n");
-            let projected = projector.project("background", &format!("turn_{}", turn_count), &raw);
-            messages.push(serde_json::json!({"role": "user", "content": projected}));
-        }
-    }
-
-    // L8: Check inbox (projected)
-    {
-        let inbox = ctx.services.message_bus.read_inbox(&ctx.identity.name);
-        if !inbox.is_empty() {
-            let text = autonomy::format_inbox(&inbox);
-            let projected = projector.project("inbox", &format!("turn_{}", turn_count), &text);
-            messages.push(serde_json::json!({"role": "user", "content": projected}));
-        }
-    }
-
-    // Heartbeat: drain cron events (projected)
-    {
-        let events = ctx.services.heartbeat_manager.drain_events();
-        if !events.is_empty() {
-            let text = events
-                .iter()
-                .map(|e| format!("[Cron '{}' fired]: {}", e.name, e.prompt))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let projected = projector.project("heartbeat", &format!("turn_{}", turn_count), &text);
-            messages.push(serde_json::json!({"role": "user", "content": projected}));
-        }
-    }
-
-    // Set memory recall query for this turn's seed
-    memory_seed.set_query(input);
-
-    token_count
-}
-
-// ---------------------------------------------------------------------------
 // Oneshot mode
 // ---------------------------------------------------------------------------
 
@@ -371,7 +249,7 @@ fn run_oneshot(
     projector: &Projector,
     memory_seed: &MemorySeed,
     prompt_assembler: &mut PromptAssembler,
-    seed_collector: &SeedCollector,
+    seed_collector: &Arc<Mutex<SeedCollector>>,
     tool_defs: &[serde_json::Value],
     model_name: &str,
     registry: &HandlerRegistry,
@@ -410,7 +288,10 @@ fn run_oneshot(
         model_name,
         &ctx.identity.id,
         &ctx.identity.session_id,
-        seed_collector.render(),
+        seed_collector
+            .lock()
+            .expect("SeedCollector lock poisoned")
+            .render(),
     );
     let system = prompt_assembler.compose(&prompt_ctx);
 
@@ -526,8 +407,8 @@ fn main() {
         eprintln!("warning: --tui requires a TTY; falling back to non-interactive behavior");
         tui_mode = false;
     }
-    if !interactive_tty && !oneshot && !cli.repl {
-        eprintln!("error: interactive mode requires a TTY. Provide a prompt (one-shot) or use --repl explicitly.");
+    if !interactive_tty && !oneshot && !cli.repl && cli.gateway.is_none() {
+        eprintln!("error: interactive mode requires a TTY. Provide a prompt (one-shot), use --repl, or use --gateway for headless.");
         std::process::exit(2);
     }
 
@@ -565,27 +446,35 @@ fn main() {
     // -- LLM backend (wrapped in resilience + ContextGuard layers)
     let transcript_dir = data_dir.join("transcripts");
     let (mut llm_box, model_name): (Box<dyn Llm>, String) = {
-        let (inner, model) = match config.backend.as_str() {
-            "openai" => {
-                let llm = OpenAiLlm::from_env();
-                let m = llm.model.clone();
-                (Box::new(llm) as Box<dyn Llm>, m)
-            }
-            _ => {
-                let llm = AnthropicLlm::from_env();
-                let m = llm.model.clone();
-                (Box::new(llm) as Box<dyn Llm>, m)
-            }
-        };
-        (
-            wrap_llm(
-                inner,
-                auth_prefix_for(&config.backend),
-                &transcript_dir,
-                llm_log_sink,
-            ),
-            model,
-        )
+        let use_mock_llm = cli.gateway.is_some() && !tui_mode && !cli.repl
+            && std::env::var("MOCK_LLM").as_deref() == Ok("1");
+        if use_mock_llm {
+            let mut mock = nano_agent::mock::MockLLM::new();
+            mock.queue("end_turn", vec![nano_agent::mock::make_text_block("OK")]);
+            (Box::new(mock) as Box<dyn Llm>, "mock".to_string())
+        } else {
+            let (inner, model) = match config.backend.as_str() {
+                "openai" => {
+                    let llm = OpenAiLlm::from_env();
+                    let m = llm.model.clone();
+                    (Box::new(llm) as Box<dyn Llm>, m)
+                }
+                _ => {
+                    let llm = AnthropicLlm::from_env();
+                    let m = llm.model.clone();
+                    (Box::new(llm) as Box<dyn Llm>, m)
+                }
+            };
+            (
+                wrap_llm(
+                    inner,
+                    auth_prefix_for(&config.backend),
+                    &transcript_dir,
+                    llm_log_sink,
+                ),
+                model,
+            )
+        }
     };
 
     // -- Data directories
@@ -651,7 +540,7 @@ fn main() {
     let prompt_state = Arc::new(Mutex::new(PromptState::new(&agent_name, &agent_role)));
 
     // -- CLI channel (reedline-based, owned separately for direct read_line access)
-    let cli_channel: Option<Arc<CliChannel>> = if !oneshot && !tui_mode {
+    let cli_channel: Option<Arc<CliChannel>> = if !oneshot && !tui_mode && cli.gateway.is_none() {
         let history_path = data_dir.join("history.txt");
         let nano_prompt = NanoPrompt::new(Arc::clone(&prompt_state));
         let cli_ch = Arc::new(
@@ -666,12 +555,14 @@ fn main() {
         None
     };
 
+    let mut ws_channel_for_gateway: Option<Arc<WebSocketChannel>> = None;
     if !oneshot {
         // -- GAP 7: Gateway (optional, via --gateway flag)
         if let Some(ref addr) = cli.gateway {
             let gw = Gateway::new(addr);
             gw.start();
             let ws_channel = gw.ws_channel();
+            ws_channel_for_gateway = Some(Arc::clone(&ws_channel));
             channel_manager
                 .lock()
                 .expect("ChannelManager lock poisoned")
@@ -698,11 +589,14 @@ fn main() {
 
     // -- SeedCollector: uniform system prompt contribution
     let memory_seed = Arc::new(MemorySeed::new(Arc::clone(&memory_store)));
-    let mut seed_collector = SeedCollector::new();
-    seed_collector.register(Arc::new(TodoSeed::new(Arc::clone(&todo_manager))));
-    seed_collector.register(Arc::new(SkillSeed::new(Arc::clone(&skill_loader))));
-    seed_collector.register(Arc::new(TaskSeed::new(Arc::clone(&task_manager))));
-    seed_collector.register(Arc::clone(&memory_seed) as Arc<dyn nano_agent::context::Seed>);
+    let seed_collector = Arc::new(Mutex::new(SeedCollector::new()));
+    {
+        let mut sc = seed_collector.lock().expect("SeedCollector lock poisoned");
+        sc.register(Arc::new(TodoSeed::new(Arc::clone(&todo_manager))));
+        sc.register(Arc::new(SkillSeed::new(Arc::clone(&skill_loader))));
+        sc.register(Arc::new(TaskSeed::new(Arc::clone(&task_manager))));
+        sc.register(Arc::clone(&memory_seed) as Arc<dyn nano_agent::context::Seed>);
+    }
 
     // -- Register self as a teammate (skip in oneshot — avoids disk writes)
     if !oneshot {
@@ -823,6 +717,187 @@ fn main() {
         return;
     }
 
+    // -- Headless gateway mode: WebSocket JSON-RPC control plane (no REPL/TUI)
+    if cli.gateway.is_some() && !tui_mode && !cli.repl {
+        let ws_channel = ws_channel_for_gateway
+            .as_ref()
+            .expect("ws_channel must exist when --gateway is set");
+
+        let core = agent_core::AgentCore::start(
+            ctx.clone(),
+            llm_box,
+            Arc::clone(&registry),
+            Arc::new(tool_defs),
+            model_name.clone(),
+            data_dir.join("prompts"),
+            transcript_dir.clone(),
+            Arc::clone(&projector),
+            Arc::clone(&memory_seed),
+            Arc::clone(&seed_collector),
+        );
+
+        let pending: Arc<Mutex<HashMap<String, (serde_json::Value, String)>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        // Inbound: ws -> JSON-RPC -> core commands
+        {
+            let ws_in = Arc::clone(ws_channel);
+            let core_in = core.clone();
+            let pending_in = Arc::clone(&pending);
+            std::thread::spawn(move || loop {
+                if let Some(msg) = ws_in.recv() {
+                    let req = match ws_jsonrpc::parse_request(&msg.text) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let _ = ws_in.send(&msg.peer_id, &ws_jsonrpc::err(serde_json::Value::Null, -32700, e));
+                            continue;
+                        }
+                    };
+                    if req.jsonrpc != "2.0" {
+                        let _ = ws_in.send(&msg.peer_id, &ws_jsonrpc::err(req.id, -32600, "jsonrpc must be '2.0'"));
+                        continue;
+                    }
+
+                    let request_id = match &req.id {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+
+                    match req.method.as_str() {
+                        "agent.run_turn" => {
+                            let id_value = req.id.clone();
+                            let prompt = req
+                                .params
+                                .get("prompt")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            let include_bus = req
+                                .params
+                                .get("include_bus_events")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let Some(prompt) = prompt else {
+                                let _ = ws_in.send(
+                                    &msg.peer_id,
+                                    &ws_jsonrpc::err(req.id, -32602, "params.prompt (string) required"),
+                                );
+                                continue;
+                            };
+                            pending_in
+                                .lock()
+                                .expect("pending lock poisoned")
+                                .insert(request_id.clone(), (id_value, msg.peer_id.clone()));
+                            if let Err(e) = agent_core::AgentCore::enqueue_turn(
+                                &core_in,
+                                request_id.clone(),
+                                Some(msg.peer_id.clone()),
+                                prompt,
+                                include_bus,
+                            ) {
+                                let _ = ws_in.send(&msg.peer_id, &ws_jsonrpc::err(req.id, -32000, e));
+                            }
+                        }
+                        "agent.status" => {
+                            pending_in
+                                .lock()
+                                .expect("pending lock poisoned")
+                                .insert(request_id.clone(), (req.id.clone(), msg.peer_id.clone()));
+                            let _ = core_in.cmd_tx.send(agent_core::AgentCommand::Status {
+                                request_id,
+                                peer_id: Some(msg.peer_id.clone()),
+                            });
+                        }
+                        "agent.interrupt" => {
+                            let _ = core_in.cmd_tx.send(agent_core::AgentCommand::Interrupt {
+                                request_id: None,
+                            });
+                            let _ = ws_in.send(&msg.peer_id, &ws_jsonrpc::ok(req.id, serde_json::json!({"ok": true})));
+                        }
+                        _ => {
+                            let _ = ws_in.send(&msg.peer_id, &ws_jsonrpc::err(req.id, -32601, "method not found"));
+                        }
+                    }
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            });
+        }
+
+        // Outbound: core events -> JSON-RPC notifications/responses
+        {
+            let ws_out = Arc::clone(ws_channel);
+            let pending_out = Arc::clone(&pending);
+            let event_rx = Arc::clone(&core.event_rx);
+            std::thread::spawn(move || loop {
+                let env = {
+                    let rx = event_rx.lock().expect("event_rx lock poisoned");
+                    rx.recv()
+                };
+                let Ok(env) = env else { break };
+
+                let peer = match env.peer_id.clone() {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                // Responses (Status, TurnFinished, Error) are tied to pending request ids.
+                match &env.event {
+                    agent_core::AgentEvent::Status { .. } => {
+                        if let Some((id_value, _peer0)) = pending_out
+                            .lock()
+                            .expect("pending lock poisoned")
+                            .remove(&env.request_id)
+                        {
+                            let _ = ws_out.send(&peer, &ws_jsonrpc::ok(id_value, &env.event));
+                        }
+                        continue;
+                    }
+                    agent_core::AgentEvent::TurnFinished { assistant_text, .. } => {
+                        if let Some((id_value, _peer0)) = pending_out
+                            .lock()
+                            .expect("pending lock poisoned")
+                            .remove(&env.request_id)
+                        {
+                            let _ = ws_out.send(
+                                &peer,
+                                &ws_jsonrpc::ok(id_value, serde_json::json!({ "assistant_text": assistant_text })),
+                            );
+                        }
+                        // Also emit as event notification for streaming clients.
+                    }
+                    agent_core::AgentEvent::Error { message, .. } => {
+                        if let Some((id_value, _peer0)) = pending_out
+                            .lock()
+                            .expect("pending lock poisoned")
+                            .remove(&env.request_id)
+                        {
+                            let _ = ws_out.send(&peer, &ws_jsonrpc::err(id_value, -32001, message));
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+
+                let notif = JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "agent.event",
+                    params: serde_json::json!({
+                        "request_id": env.request_id,
+                        "event": env.event,
+                    }),
+                };
+                if let Ok(text) = serde_json::to_string(&notif) {
+                    let _ = ws_out.send(&peer, &text);
+                }
+            });
+        }
+
+        // Block forever; Ctrl+C will terminate the process.
+        loop {
+            std::thread::park_timeout(std::time::Duration::from_secs(3600));
+        }
+    }
+
     // -- UI wiring for interactive modes (REPL or TUI)
     {
         let bus = Arc::clone(&event_bus);
@@ -850,7 +925,7 @@ fn main() {
         let registry_arc = Arc::clone(&registry);
         let tool_defs_arc = Arc::new(tool_defs);
 
-        let seed_collector = Arc::new(Mutex::new(seed_collector));
+        let seed_collector = Arc::clone(&seed_collector);
 
         let turn_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let prev_message_count_arc = Arc::new(Mutex::new(prev_message_count));
@@ -1123,7 +1198,10 @@ fn main() {
             &model_name,
             &agent_id,
             &session_id,
-            seed_collector.render(),
+            seed_collector
+                .lock()
+                .expect("SeedCollector lock poisoned")
+                .render(),
         );
         let system = prompt_assembler.compose(&prompt_ctx);
 
