@@ -282,6 +282,7 @@ pub fn run_tui(
                 }
                 Event::Paste(data) => {
                     if app.focus == AppFocus::Input {
+                        app.reset_input_history_nav();
                         input.insert_str(&data);
                         if app.at_picker_open {
                             if input.cursor() <= app.at_anchor {
@@ -362,6 +363,7 @@ fn handle_key(
             app.push_toast("Interrupt requested");
         } else {
             input.clear();
+            app.reset_input_history_nav();
         }
         return Ok(false);
     }
@@ -454,6 +456,38 @@ fn handle_key(
             }
         }
         KeyEvent {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if !app.at_picker_open && app.focus == AppFocus::Input => {
+            if app.input_history.is_empty() {
+                return Ok(false);
+            }
+
+            let last_idx = app.input_history.len() - 1;
+            app.input_history_pos = match app.input_history_pos {
+                None => Some(last_idx),
+                Some(0) => Some(0),
+                Some(i) => Some(i.saturating_sub(1)),
+            };
+
+            if let Some(pos) = app.input_history_pos {
+                // Save live draft once, the first time the user enters history browsing.
+                if app.input_history_draft.is_none() {
+                    app.input_history_draft = Some((input.text().to_string(), input.cursor()));
+                }
+
+                // Clone to avoid holding a borrow into `app.input_history` while mutating `app`.
+                let text = app.input_history[pos].clone();
+                let cursor = text.len();
+
+                input.clear();
+                input.insert_str(&text);
+                input.set_cursor(cursor);
+                app.input_scroll = 0;
+            }
+        }
+        KeyEvent {
             code: KeyCode::Down,
             modifiers: KeyModifiers::NONE,
             ..
@@ -465,10 +499,58 @@ fn handle_key(
             }
         }
         KeyEvent {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if !app.at_picker_open && app.focus == AppFocus::Input => {
+            if app.input_history.is_empty() {
+                return Ok(false);
+            }
+
+            let len = app.input_history.len();
+            match app.input_history_pos {
+                None => {
+                    // If we haven't started browsing yet, Down restores the live draft.
+                    if let Some((draft, cursor)) = app.input_history_draft.take() {
+                        input.clear();
+                        input.insert_str(&draft);
+                        input.set_cursor(cursor);
+                        app.input_history_pos = None;
+                        app.input_scroll = 0;
+                    }
+                }
+                Some(pos) => {
+                    if pos + 1 < len {
+                        app.input_history_pos = Some(pos + 1);
+                        // Clone to avoid holding a borrow into `app.input_history` while mutating `app`.
+                        let text = app.input_history[pos + 1].clone();
+                        let cursor = text.len();
+
+                        input.clear();
+                        input.insert_str(&text);
+                        input.set_cursor(cursor);
+                        app.input_scroll = 0;
+                    } else {
+                        // Past newest: restore live draft and exit history browsing.
+                        if let Some((draft, cursor)) = app.input_history_draft.take() {
+                            input.clear();
+                            input.insert_str(&draft);
+                            input.set_cursor(cursor);
+                        } else {
+                            input.clear();
+                        }
+                        app.input_history_pos = None;
+                        app.input_scroll = 0;
+                    }
+                }
+            }
+        }
+        KeyEvent {
             code: KeyCode::Enter,
             modifiers: KeyModifiers::SHIFT,
             ..
         } => {
+            app.reset_input_history_nav();
             input.newline();
         }
         KeyEvent {
@@ -479,6 +561,7 @@ fn handle_key(
             if app.at_picker_open && app.focus == AppFocus::Input {
                 if let Some(it) = app.at_results.get(app.at_scroll) {
                     let token = at_token(&it.rel, it.is_dir);
+                    app.reset_input_history_nav();
                     input.replace_range(app.at_anchor, input.cursor(), &token);
                 }
                 app.at_picker_open = false;
@@ -492,6 +575,8 @@ fn handle_key(
 
             // Slash compat: route as command (changes panes/state) even while running.
             if current.trim_start().starts_with('/') {
+                app.push_input_history(&current);
+                app.reset_input_history_nav();
                 let text = input.take();
                 app.handle_slash_command(text.trim());
                 return Ok(false);
@@ -502,6 +587,9 @@ fn handle_key(
                 app.push_toast("Turn running — send disabled");
                 return Ok(false);
             }
+
+            app.push_input_history(&current);
+            app.reset_input_history_nav();
 
             // Start an agent turn
             let text = input.take();
@@ -541,6 +629,7 @@ fn handle_key(
             ..
         } => {
             input.backspace();
+            app.reset_input_history_nav();
             if app.at_picker_open && app.focus == AppFocus::Input {
                 if input.cursor() <= app.at_anchor {
                     app.at_picker_open = false;
@@ -601,6 +690,7 @@ fn handle_key(
         } if !modifiers.contains(KeyModifiers::CONTROL)
             && !modifiers.contains(KeyModifiers::ALT) =>
         {
+            app.reset_input_history_nav();
             input.insert_char(ch);
             if app.focus == AppFocus::Input {
                 if ch == '@' {

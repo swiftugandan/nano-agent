@@ -113,6 +113,15 @@ pub struct AppState {
     pub at_results: Vec<AtPickItem>,
     pub input_scroll: u16,
 
+    /// Session-only history for the TUI input buffer (read via Up/Down).
+    /// This is intentionally separate from the CLI reedline history.
+    pub input_history: Vec<String>,
+    /// When browsing history, `Some(i)` points at `input_history[i]`.
+    /// When `None`, the user is at the live draft.
+    pub input_history_pos: Option<usize>,
+    /// Saved live draft so we can restore it when navigating back down.
+    pub input_history_draft: Option<(String, usize)>, // (text, cursor_byte_index)
+
     pub messages: Option<Arc<Mutex<Vec<serde_json::Value>>>>,
     pub chat: Vec<ChatItem>,
     /// Scroll up from bottom, in lines. 0 = anchored to bottom.
@@ -164,6 +173,10 @@ impl AppState {
             at_scroll: 0,
             at_results: Vec::new(),
             input_scroll: 0,
+
+            input_history: Vec::new(),
+            input_history_pos: None,
+            input_history_draft: None,
             messages: None,
             chat: Vec::new(),
             chat_scroll: 0,
@@ -173,6 +186,31 @@ impl AppState {
             activity: VecDeque::new(),
             tool_feed: Vec::new(),
             quit_requested: false,
+        }
+    }
+
+    pub fn reset_input_history_nav(&mut self) {
+        self.input_history_pos = None;
+        self.input_history_draft = None;
+    }
+
+    pub fn push_input_history(&mut self, text: &str) {
+        const INPUT_HISTORY_MAX: usize = 1000;
+
+        let t = text.trim();
+        if t.is_empty() {
+            return;
+        }
+
+        // Avoid immediate duplicates when re-submitting the same recalled entry.
+        if self.input_history.last().is_some_and(|last| last == t) {
+            return;
+        }
+
+        self.input_history.push(t.to_string());
+        if self.input_history.len() > INPUT_HISTORY_MAX {
+            let overflow = self.input_history.len() - INPUT_HISTORY_MAX;
+            self.input_history.drain(0..overflow);
         }
     }
 

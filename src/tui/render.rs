@@ -210,7 +210,6 @@ fn render_chat(f: &mut Frame, app: &AppState, area: Rect) {
 
     let para = Paragraph::new(lines)
         .block(panel(app, " chat ", focused))
-        .wrap(Wrap { trim: false })
         .scroll((offset.min(u16::MAX as usize) as u16, 0));
     f.render_widget(para, area);
 }
