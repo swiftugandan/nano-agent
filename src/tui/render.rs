@@ -252,6 +252,36 @@ fn cursor_metrics(text: &str, cursor: usize, width: u16) -> (u16, u16) {
     }
 }
 
+/// Hard-wrap input text by display width; preserves explicit `\n`. Matches cursor_metrics so
+/// rendered lines align with cursor row/col.
+fn input_hard_wrap(text: &str, width: u16) -> Vec<Line<'static>> {
+    let w = width.max(1) as usize;
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut col = 0usize;
+    for ch in text.chars() {
+        if ch == '\n' {
+            out.push(std::mem::take(&mut cur));
+            col = 0;
+            continue;
+        }
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        if col + cw > w && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+            col = 0;
+        }
+        cur.push(ch);
+        col += cw;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out.into_iter().map(|s| Line::from(Span::raw(s))).collect()
+}
+
 fn render_input(
     f: &mut Frame,
     app: &mut AppState,
@@ -276,10 +306,8 @@ fn render_input(
             app.input_scroll = max_scroll;
         }
 
-        let p = Paragraph::new(input.text())
-            .block(b)
-            .wrap(Wrap { trim: false })
-            .scroll((app.input_scroll, 0));
+        let lines = input_hard_wrap(input.text(), inner.width);
+        let p = Paragraph::new(lines).block(b).scroll((app.input_scroll, 0));
         f.render_widget(p, area);
 
         let overlays_open = app.help_open || palette.is_open() || app.at_picker_open;
@@ -314,10 +342,8 @@ fn render_input(
         app.input_scroll = max_scroll;
     }
 
-    let p = Paragraph::new(input.text())
-        .block(b)
-        .wrap(Wrap { trim: false })
-        .scroll((app.input_scroll, 0));
+    let lines = input_hard_wrap(input.text(), inner.width);
+    let p = Paragraph::new(lines).block(b).scroll((app.input_scroll, 0));
     f.render_widget(p, parts[1]);
 
     let overlays_open = app.help_open || palette.is_open() || app.at_picker_open;
@@ -622,9 +648,7 @@ fn render_help(f: &mut Frame, _app: &AppState, area: Rect) {
         Line::from(Span::raw(
             ":   panels/toggles — open any time. status, tasks, team, events,",
         )),
-        Line::from(Span::raw(
-            "    tools, inspector (toggle), sidebar (toggle)",
-        )),
+        Line::from(Span::raw("    tools, inspector (toggle), sidebar (toggle)")),
         Line::from(Span::raw("Esc      close overlays")),
     ];
     let b = Block::default().title(" help ").borders(Borders::ALL);
