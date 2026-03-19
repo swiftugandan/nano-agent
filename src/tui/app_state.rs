@@ -124,6 +124,8 @@ pub struct AppState {
 
     pub activity: VecDeque<ActivityItem>,
     pub tool_feed: Vec<Line<'static>>,
+
+    pub quit_requested: bool,
 }
 
 impl AppState {
@@ -170,6 +172,7 @@ impl AppState {
             last_error: None,
             activity: VecDeque::new(),
             tool_feed: Vec::new(),
+            quit_requested: false,
         }
     }
 
@@ -264,7 +267,7 @@ impl AppState {
     pub fn handle_slash_command(&mut self, cmd: &str) {
         match cmd {
             "/quit" => {
-                self.push_toast("Use Ctrl+Q to quit TUI");
+                self.quit_requested = true;
             }
             "/clear" => {
                 self.chat.clear();

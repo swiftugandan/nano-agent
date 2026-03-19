@@ -311,6 +311,9 @@ pub fn run_tui(
                     )? {
                         break 'outer;
                     }
+                    if app.quit_requested {
+                        break 'outer;
+                    }
                 }
                 _ => {}
             }

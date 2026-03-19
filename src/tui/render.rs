@@ -244,8 +244,12 @@ fn cursor_metrics(text: &str, cursor: usize, width: u16) -> (u16, u16) {
         }
     }
 
-    let cursor_col = (col.min(w.saturating_sub(1))) as u16;
-    (row, cursor_col)
+    if col >= w {
+        (row.saturating_add(1), 0)
+    } else {
+        let cursor_col = (col.min(w.saturating_sub(1))) as u16;
+        (row, cursor_col)
+    }
 }
 
 fn render_input(
@@ -601,7 +605,7 @@ fn render_help(f: &mut Frame, _app: &AppState, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::raw("")),
-        Line::from(Span::raw("Ctrl+Q   quit TUI")),
+        Line::from(Span::raw("Ctrl+Q or /quit   quit TUI")),
         Line::from(Span::raw("Ctrl+C   interrupt agent turn / clear input")),
         Line::from(Span::raw("Tab      cycle focus")),
         Line::from(Span::raw("PageUp/Down scroll chat")),
@@ -610,7 +614,7 @@ fn render_help(f: &mut Frame, _app: &AppState, area: Rect) {
         Line::from(Span::raw("")),
         Line::from(Span::raw("Palette:")),
         Line::from(Span::raw(
-            "/        slash palette (status/tasks/team/events/help/clear)",
+            "/        slash palette (status/tasks/team/events/help/clear/quit)",
         )),
         Line::from(Span::raw(
             ":        commands (status/tasks/team/events/tools)",
