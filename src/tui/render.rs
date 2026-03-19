@@ -127,8 +127,8 @@ fn render_sidebar(f: &mut Frame, app: &AppState, area: Rect) {
         Line::from(Span::raw("  Ctrl+C interrupt")),
         Line::from(Span::raw("  ? help")),
         Line::from(Span::raw("  Tab focus")),
-        Line::from(Span::raw("  / palette")),
-        Line::from(Span::raw("  : commands")),
+        Line::from(Span::raw("  /  UI commands (help, clear, quit)")),
+        Line::from(Span::raw("  :  panels (tools, inspector, sidebar)")),
     ];
     let w = Paragraph::new(lines).block(panel(app, " nano-agent ", focused));
     f.render_widget(w, area);
@@ -614,10 +614,16 @@ fn render_help(f: &mut Frame, _app: &AppState, area: Rect) {
         Line::from(Span::raw("")),
         Line::from(Span::raw("Palette:")),
         Line::from(Span::raw(
-            "/        slash palette (status/tasks/team/events/help/clear/quit)",
+            "/   session/UI — open when input empty; or type /cmd and Enter.",
         )),
         Line::from(Span::raw(
-            ":        commands (status/tasks/team/events/tools)",
+            "    status, tasks, team, events, help, clear, quit",
+        )),
+        Line::from(Span::raw(
+            ":   panels/toggles — open any time. status, tasks, team, events,",
+        )),
+        Line::from(Span::raw(
+            "    tools, inspector (toggle), sidebar (toggle)",
         )),
         Line::from(Span::raw("Esc      close overlays")),
     ];
@@ -635,8 +641,8 @@ fn render_palette(f: &mut Frame, _app: &AppState, palette: &CommandPalette, area
     let h = area.height.clamp(7, 12);
     let r = centered(area, w, h);
     let title = match palette.mode {
-        PaletteMode::Slash => " / ",
-        PaletteMode::Colon => " : ",
+        PaletteMode::Slash => " / session ",
+        PaletteMode::Colon => " : panels ",
         PaletteMode::None => " ",
     };
     let b = Block::default().title(title).borders(Borders::ALL);

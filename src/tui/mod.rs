@@ -374,7 +374,7 @@ fn handle_key(
         return Ok(false);
     }
 
-    // Open palette (:) or slash menu (/)
+    // : = panels/toggles (always); / = session/UI commands (when input empty; also typeable as /cmd in input)
     if matches!(
         key,
         KeyEvent {
