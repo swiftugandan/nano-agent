@@ -9,4 +9,3 @@ fn parse_jsonrpc_request() {
     assert_eq!(req.id.as_str().unwrap(), "1");
     assert_eq!(req.params["prompt"].as_str().unwrap(), "hi");
 }
-

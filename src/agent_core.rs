@@ -4,12 +4,15 @@ use crate::handler::{AgentContext, HandlerRegistry};
 use crate::isolation::EventRecord;
 use crate::pipeline::{build_pre_turn_context, PreTurnUi};
 use crate::prompt::{build_prompt_context, extract_last_response_text, PromptAssembler};
-use crate::types::{ToolEvent, Llm};
+use crate::types::{Llm, ToolEvent};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+
+/// (request_id, peer_id, include_bus_events) for the active turn.
+type CurrentRoute = Arc<Mutex<Option<(String, Option<String>, bool)>>>;
 
 #[derive(Debug, Clone)]
 pub enum AgentCommand {
@@ -33,9 +36,7 @@ pub enum AgentCommand {
 #[serde(tag = "type")]
 pub enum AgentEvent {
     #[serde(rename = "turn_started")]
-    TurnStarted {
-        request_id: String,
-    },
+    TurnStarted { request_id: String },
 
     #[serde(rename = "tool_start")]
     ToolStart {
@@ -66,15 +67,9 @@ pub enum AgentEvent {
     },
 
     #[serde(rename = "warning")]
-    Warning {
-        request_id: String,
-        message: String,
-    },
+    Warning { request_id: String, message: String },
     #[serde(rename = "error")]
-    Error {
-        request_id: String,
-        message: String,
-    },
+    Error { request_id: String, message: String },
 
     #[serde(rename = "turn_finished")]
     TurnFinished {
@@ -168,31 +163,32 @@ impl AgentCore {
         let queued_len = Arc::new(AtomicUsize::new(0));
 
         // Track current request/peer for EventBus forwarding (sequential core).
-        let current_route: Arc<Mutex<Option<(String, Option<String>, bool)>>> =
-            Arc::new(Mutex::new(None));
+        let current_route: CurrentRoute = Arc::new(Mutex::new(None));
 
         // Subscribe EventBus once; forward only when a turn is active and includes bus events.
         {
             let route = Arc::clone(&current_route);
             let tx = event_tx.clone();
-            ctx.services.event_bus.subscribe(Arc::new(move |record: EventRecord| {
-                let (req, peer, include) = match route.lock().ok().and_then(|g| g.clone()) {
-                    Some(v) => v,
-                    None => return,
-                };
-                if !include {
-                    return;
-                }
-                let _ = tx.send(AgentEventEnvelope {
-                    peer_id: peer.clone(),
-                    request_id: req.clone(),
-                    event: AgentEvent::BusEvent {
-                        request_id: req,
-                        event: record.event,
-                        data: record.data,
-                    },
-                });
-            }));
+            ctx.services
+                .event_bus
+                .subscribe(Arc::new(move |record: EventRecord| {
+                    let (req, peer, include) = match route.lock().ok().and_then(|g| g.clone()) {
+                        Some(v) => v,
+                        None => return,
+                    };
+                    if !include {
+                        return;
+                    }
+                    let _ = tx.send(AgentEventEnvelope {
+                        peer_id: peer.clone(),
+                        request_id: req.clone(),
+                        event: AgentEvent::BusEvent {
+                            request_id: req,
+                            event: record.event,
+                            data: record.data,
+                        },
+                    });
+                }));
         }
 
         let busy_flag_worker = Arc::clone(&busy_flag);
@@ -202,12 +198,7 @@ impl AgentCore {
             let mut prev_message_count = messages.len();
             let turn_counter = std::sync::atomic::AtomicUsize::new(0);
 
-            loop {
-                let cmd = match cmd_rx.recv() {
-                    Ok(c) => c,
-                    Err(_) => break,
-                };
-
+            while let Ok(cmd) = cmd_rx.recv() {
                 match cmd {
                     AgentCommand::Shutdown => break,
                     AgentCommand::Interrupt { .. } => {
@@ -215,7 +206,10 @@ impl AgentCore {
                             sig.store(true, Ordering::Release);
                         }
                     }
-                    AgentCommand::Status { request_id, peer_id } => {
+                    AgentCommand::Status {
+                        request_id,
+                        peer_id,
+                    } => {
                         let _ = event_tx.send(AgentEventEnvelope {
                             peer_id,
                             request_id: request_id.clone(),
@@ -235,10 +229,11 @@ impl AgentCore {
                         prompt,
                         include_bus_events,
                     } => {
-                        queued_len_worker.fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
-                            Some(x.saturating_sub(1))
-                        })
-                        .ok();
+                        queued_len_worker
+                            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
+                                Some(x.saturating_sub(1))
+                            })
+                            .ok();
                         busy_flag_worker.store(true, Ordering::Release);
                         if let Ok(mut r) = current_route.lock() {
                             *r = Some((request_id.clone(), peer_id.clone(), include_bus_events));
@@ -434,4 +429,3 @@ impl AgentCore {
             .map_err(|e| format!("AgentCore command send failed: {}", e))
     }
 }
-

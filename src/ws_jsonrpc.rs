@@ -65,4 +65,3 @@ pub fn err(id: serde_json::Value, code: i64, message: impl Into<String>) -> Stri
     })
     .unwrap_or_else(|_| "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"serialize error\"}}".to_string())
 }
-

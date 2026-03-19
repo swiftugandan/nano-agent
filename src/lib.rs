@@ -1,5 +1,5 @@
-pub mod anthropic;
 pub mod agent_core;
+pub mod anthropic;
 pub mod autonomy;
 pub mod channels;
 pub mod cli;

@@ -1,7 +1,7 @@
 use clap::Parser;
 use nano_agent::anthropic::AnthropicLlm;
-use nano_agent::channels::{ChannelManager, CliChannel};
 use nano_agent::channels::Channel;
+use nano_agent::channels::{ChannelManager, CliChannel};
 use nano_agent::cli::Cli;
 use nano_agent::concurrency::BackgroundManager;
 use nano_agent::context::{MemorySeed, Projector, SeedCollector, SkillSeed, TaskSeed, TodoSeed};
@@ -19,8 +19,8 @@ use nano_agent::knowledge::SkillLoader;
 use nano_agent::memory;
 use nano_agent::memory_store::MemoryStore;
 use nano_agent::openai::OpenAiLlm;
-use nano_agent::planning::{NagPolicy, TodoManager};
 use nano_agent::pipeline::{build_pre_turn_context, PreTurnUi};
+use nano_agent::planning::{NagPolicy, TodoManager};
 use nano_agent::prompt::{build_prompt_context, extract_last_response_text, PromptAssembler};
 use nano_agent::protocols::RequestTracker;
 use nano_agent::tasks::TaskManager;
@@ -446,7 +446,9 @@ fn main() {
     // -- LLM backend (wrapped in resilience + ContextGuard layers)
     let transcript_dir = data_dir.join("transcripts");
     let (mut llm_box, model_name): (Box<dyn Llm>, String) = {
-        let use_mock_llm = cli.gateway.is_some() && !tui_mode && !cli.repl
+        let use_mock_llm = cli.gateway.is_some()
+            && !tui_mode
+            && !cli.repl
             && std::env::var("MOCK_LLM").as_deref() == Ok("1");
         if use_mock_llm {
             let mut mock = nano_agent::mock::MockLLM::new();
@@ -749,12 +751,18 @@ fn main() {
                     let req = match ws_jsonrpc::parse_request(&msg.text) {
                         Ok(r) => r,
                         Err(e) => {
-                            let _ = ws_in.send(&msg.peer_id, &ws_jsonrpc::err(serde_json::Value::Null, -32700, e));
+                            let _ = ws_in.send(
+                                &msg.peer_id,
+                                &ws_jsonrpc::err(serde_json::Value::Null, -32700, e),
+                            );
                             continue;
                         }
                     };
                     if req.jsonrpc != "2.0" {
-                        let _ = ws_in.send(&msg.peer_id, &ws_jsonrpc::err(req.id, -32600, "jsonrpc must be '2.0'"));
+                        let _ = ws_in.send(
+                            &msg.peer_id,
+                            &ws_jsonrpc::err(req.id, -32600, "jsonrpc must be '2.0'"),
+                        );
                         continue;
                     }
 
@@ -779,7 +787,11 @@ fn main() {
                             let Some(prompt) = prompt else {
                                 let _ = ws_in.send(
                                     &msg.peer_id,
-                                    &ws_jsonrpc::err(req.id, -32602, "params.prompt (string) required"),
+                                    &ws_jsonrpc::err(
+                                        req.id,
+                                        -32602,
+                                        "params.prompt (string) required",
+                                    ),
                                 );
                                 continue;
                             };
@@ -794,7 +806,8 @@ fn main() {
                                 prompt,
                                 include_bus,
                             ) {
-                                let _ = ws_in.send(&msg.peer_id, &ws_jsonrpc::err(req.id, -32000, e));
+                                let _ =
+                                    ws_in.send(&msg.peer_id, &ws_jsonrpc::err(req.id, -32000, e));
                             }
                         }
                         "agent.status" => {
@@ -808,13 +821,19 @@ fn main() {
                             });
                         }
                         "agent.interrupt" => {
-                            let _ = core_in.cmd_tx.send(agent_core::AgentCommand::Interrupt {
-                                request_id: None,
-                            });
-                            let _ = ws_in.send(&msg.peer_id, &ws_jsonrpc::ok(req.id, serde_json::json!({"ok": true})));
+                            let _ = core_in
+                                .cmd_tx
+                                .send(agent_core::AgentCommand::Interrupt { request_id: None });
+                            let _ = ws_in.send(
+                                &msg.peer_id,
+                                &ws_jsonrpc::ok(req.id, serde_json::json!({"ok": true})),
+                            );
                         }
                         _ => {
-                            let _ = ws_in.send(&msg.peer_id, &ws_jsonrpc::err(req.id, -32601, "method not found"));
+                            let _ = ws_in.send(
+                                &msg.peer_id,
+                                &ws_jsonrpc::err(req.id, -32601, "method not found"),
+                            );
                         }
                     }
                 } else {
@@ -860,7 +879,10 @@ fn main() {
                         {
                             let _ = ws_out.send(
                                 &peer,
-                                &ws_jsonrpc::ok(id_value, serde_json::json!({ "assistant_text": assistant_text })),
+                                &ws_jsonrpc::ok(
+                                    id_value,
+                                    serde_json::json!({ "assistant_text": assistant_text }),
+                                ),
                             );
                         }
                         // Also emit as event notification for streaming clients.

@@ -59,14 +59,7 @@ fn agent_core_emits_turn_finished() {
         seed_collector,
     );
 
-    AgentCore::enqueue_turn(
-        &handle,
-        "req-1".to_string(),
-        None,
-        "hi".to_string(),
-        false,
-    )
-    .unwrap();
+    AgentCore::enqueue_turn(&handle, "req-1".to_string(), None, "hi".to_string(), false).unwrap();
 
     // Expect TurnStarted then TurnFinished (no tools in between).
     let e1 = recv_event(&handle);
@@ -90,4 +83,3 @@ fn agent_core_emits_turn_finished() {
     }
     panic!("did not observe TurnFinished");
 }
-

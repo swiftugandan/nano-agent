@@ -118,8 +118,7 @@ pub fn build_pre_turn_context(
                 .map(|e| format!("[Cron '{}' fired]: {}", e.name, e.prompt))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let projected =
-                projector.project("heartbeat", &format!("turn_{}", turn_count), &text);
+            let projected = projector.project("heartbeat", &format!("turn_{}", turn_count), &text);
             messages.push(serde_json::json!({"role": "user", "content": projected}));
         }
     }
@@ -129,4 +128,3 @@ pub fn build_pre_turn_context(
 
     token_count
 }
-
